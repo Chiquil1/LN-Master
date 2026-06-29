@@ -1,0 +1,83 @@
+import { eq, gt, sql, and, like, or, inArray } from 'drizzle-orm';
+import { dbManager } from '@database/db';
+import { novelSchema, novelCategorySchema } from '@database/schema';
+import { castInt } from '@database/manager/manager';
+
+/**
+ * Get library novels with optional filtering and sorting using Drizzle ORM
+ */
+export const getLibraryNovelsFromDb = (
+  sortOrder?: string,
+  filter?: string,
+  searchText?: string,
+  downloadedOnlyMode?: boolean,
+  excludeLocalNovels?: boolean,
+) => {
+  const query = dbManager
+    .select()
+    .from(novelSchema)
+    .where(
+      and(
+        eq(novelSchema.inLibrary, true),
+        excludeLocalNovels ? eq(novelSchema.isLocal, false) : undefined,
+        filter ? sql.raw(filter) : undefined,
+        downloadedOnlyMode
+          ? or(
+              gt(novelSchema.chaptersDownloaded, castInt(0)),
+              eq(novelSchema.isLocal, true),
+            )
+          : undefined,
+        searchText ? like(novelSchema.name, `%${searchText}%`) : undefined,
+      ),
+    )
+    .$dynamic();
+
+  if (sortOrder) {
+    query.orderBy(sql.raw(sortOrder));
+  }
+
+  return query.all();
+};
+
+/**
+ * Get library novels associated with a specific category using Drizzle ORM
+ */
+export const getLibraryWithCategory = async (
+  categoryId?: number | null,
+  onlyUpdateOngoingNovels?: boolean,
+  excludeLocalNovels?: boolean,
+) => {
+  // First, get novel IDs associated with the specified category
+  const categoryIdQuery = dbManager
+    .selectDistinct({ novelId: novelCategorySchema.novelId })
+    .from(novelCategorySchema)
+    .$dynamic();
+
+  if (categoryId) {
+    categoryIdQuery.where(eq(novelCategorySchema.categoryId, categoryId));
+  }
+
+  const idRows = await categoryIdQuery.all();
+
+  if (!idRows || idRows.length === 0) {
+    return [];
+  }
+
+  const novelIds = idRows.map(r => r.novelId);
+
+  // Then, fetch the library novels matching those IDs and other criteria
+  const result = dbManager
+    .select()
+    .from(novelSchema)
+    .where(
+      and(
+        eq(novelSchema.inLibrary, true),
+        inArray(novelSchema.id, novelIds),
+        excludeLocalNovels ? eq(novelSchema.isLocal, false) : undefined,
+        onlyUpdateOngoingNovels ? eq(novelSchema.status, 'Ongoing') : undefined,
+      ),
+    )
+    .all();
+
+  return result;
+};
