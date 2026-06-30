@@ -114,8 +114,8 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
   const appStateRef = useRef(AppState.currentState);
   const ttsQueueRef = useRef<string[]>([]);
   const ttsQueueIndexRef = useRef<number>(0);
+  const isSpeakingRef = useRef<boolean>(false);
 
-  // Servicio en segundo plano para mantener TTS activo con pantalla apagada
   const veryIntensiveTask = async () => {
     await new Promise(() => {});
   };
@@ -209,6 +209,8 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       if (BackgroundService) {
         BackgroundService.stop().catch(() => {});
       }
+      Speech.stop();
+      isSpeakingRef.current = false;
     };
   }, []);
 
@@ -222,6 +224,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
           setReaderSettings(newSettings);
 
           Speech.stop();
+          isSpeakingRef.current = false;
 
           webViewRef.current?.injectJavaScript(
             `
@@ -290,51 +293,39 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
     return () => subscription.remove();
   }, [webViewRef]);
 
-  // Función para limpiar texto antes de enviarlo al TTS (Respaldo en React Native)
+  // Función para limpiar texto antes de enviarlo al TTS
   const cleanTextForTTS = (text: string): string => {
+    if (!text) return '';
     let cleaned = text;
-    
-    // Diccionario de kaomojis y sus emociones
+
+    // 1. Limpieza de Kaomojis y Emociones
     const kaomojiEmotions: { [key: string]: string } = {
-      // Felicidad
       '(◕ᴗ◕)': 'feliz', '(◕‿◕)': 'feliz', '(◠‿◠)': 'feliz', '(✿◠‿◠)': 'feliz',
       '(◕‿◕✿)': 'feliz', '(≧◡≦)': 'feliz', '(^◡^)': 'feliz', '(｡◕‿◕｡)': 'feliz',
-      // Tristeza
       '(´・ω・`)': 'triste', '(╥﹏╥)': 'llorando', '(;´༎ຶ༎ຶ`)': 'llorando',
       '(T_T)': 'llorando', '(ToT)': 'llorando', '(；ω；)': 'llorando', '(ノ_<。)': 'llorando',
-      // Enojo/Frustración
       '(╯°□°)╯︵ ┻━┻': 'enojado volcando mesa', '(╬ಠ益ಠ)': 'muy enojado',
       '(ಠ_ಠ)': 'desaprobación', '(¬_¬)': 'desaprobación', '(ー_ー)': 'molesto',
       '(￣へ￣)': 'enojado', '(｀Д´)': 'enojado',
-      // Sorpresa
       '(⊙_⊙)': 'sorprendido', '(°ロ°)': 'sorprendido', '(O_O)': 'sorprendido',
       '(O_O;)': 'sorprendido', '(⊙_⊙;)': 'sorprendido', '(°□°)': 'sorprendido',
-      // Vergüenza/Timidez
       '(*/ω＼*)': 'avergonzado', '(*/▽＼*)': 'avergonzado', '(⁄ ⁄•⁄ω⁄•⁄ ⁄)': 'avergonzado',
-      '(〃▽〃)': 'avergonzado', '(*/。\\*)': 'avergonzado',
-      // Amor/Afecto
+      '(〃▽〃)': 'avergonzado',
       '(♥ω♥)': 'enamorado', '(♡ω♡)': 'enamorado', '(´,,•ω•,,)♡': 'cariñoso', '(∗•ω•∗)': 'cariñoso',
-      // Confusión
-      '(・_・?)': 'confundido', '(?_?)': 'confundido', '(・_・;)': 'nervioso', '(;・_・)': 'nervioso',
-      // Indiferencia
+      '(・_・?)': 'confundido', '(?_?)': 'confundido',
       '¯\\_(ツ)_/¯': 'indiferente',
-      // Fuerza/Determinación
-      '(ᕙᕗ)': 'fuerte', '(ง •̀_•́)ง': 'determinado', '(ง\'̀-\'́)ง': 'determinado', '(ᕦᕤ)': 'fuerte',
-      // Cute/Kawaii
-      '(ʕ•ᴥ•ʔ)': 'oso cute', '(=^･ω･^=)': 'gatito', '(=^‥^=)': 'gatito',
-      '(=ↀωↀ=)': 'gatito', '(｡･ω･｡)': 'cute', '(•ω•)': 'cute',
-      // Dormido/Cansado
-      '(￣o￣) zzZ': 'dormido', '(～o～) zzZ': 'dormido', '(￣ρ￣)': 'dormido', '(￣~￣)': 'cansado',
-      // Pensativo
-      '(・_・)': 'pensativo', '(´-ω-`)': 'pensativo',
+      '(ᕙᕗ)': 'fuerte', '(ง •̀_•́)ง': 'determinado',
+      '(ʕ•ᴥ•ʔ)': 'oso cute', '(=^･ω･^=)': 'gatito',
+      '(￣o￣) zzZ': 'dormido', '(～o～) zzZ': 'dormido',
     };
-    
+
     Object.entries(kaomojiEmotions).forEach(([kaomoji, emotion]) => {
       const escaped = kaomoji.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const regex = new RegExp(escaped, 'g');
       cleaned = cleaned.replace(regex, ` ${emotion} `);
     });
-    
+
+    // Limpieza genérica de kaomojis restantes
     cleaned = cleaned
       .replace(/\([^()]*[◕◠◡‿][^()]*\)/g, ' feliz ')
       .replace(/\([^()]*[╥༎ຶ;][^()]*\)/g, ' llorando ')
@@ -343,9 +334,9 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       .replace(/\([^()]*[ಠ益][^()]*\)/g, ' enojado ')
       .replace(/\([^()]*[ω・][^()]*\)/g, ' triste ')
       .replace(/\([^()]*[☆★✦✧][^()]*\)/g, ' brillante ')
-      .replace(/\([^()]*[♥♡❤][^()]*\)/g, ' con amor ')
-      .replace(/\([^()]*[╯╰╥༎ຶಠ益◕◠◡‿ω・☆★✦✧♥♡❤][^()]*\)/g, ' emoción ');
-    
+      .replace(/\([^()]*[♥♡❤][^()]*\)/g, ' con amor ');
+
+    // 2. Decodificación de Entidades HTML
     cleaned = cleaned
       .replace(/&nbsp;/gi, ' ')
       .replace(/&amp;/gi, '&')
@@ -354,22 +345,24 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       .replace(/&quot;/gi, '"')
       .replace(/&#39;/gi, "'")
       .replace(/&apos;/gi, "'")
-      .replace(/&mdash;/gi, '-')
-      .replace(/&ndash;/gi, '-')
+      .replace(/&mdash;/gi, ' - ')
+      .replace(/&ndash;/gi, ' - ')
       .replace(/&hellip;/gi, '...')
-      .replace(/&laquo;/gi, '\u00AB')
-      .replace(/&raquo;/gi, '\u00BB')
-      .replace(/&ldquo;/gi, '\u201C')
-      .replace(/&rdquo;/gi, '\u201D')
-      .replace(/&lsquo;/gi, '\u2018')
-      .replace(/&rsquo;/gi, '\u2019');
-    
+      .replace(/&laquo;/gi, '"')
+      .replace(/&raquo;/gi, '"')
+      .replace(/&ldquo;/gi, '"')
+      .replace(/&rdquo;/gi, '"')
+      .replace(/&lsquo;/gi, "'")
+      .replace(/&rsquo;/gi, "'");
+
+    // 3. Eliminación de códigos numéricos y hexadecimales
     cleaned = cleaned.replace(/&#\d+;/gi, ' ');
     cleaned = cleaned.replace(/&#x[0-9a-f]+;/gi, ' ');
-    
+
+    // 4. Eliminación de símbolos decorativos y emojis
     cleaned = cleaned
       .replace(/[★☆✦✧✩✪✫✬✭✮✯✰]+/g, '')
-      .replace(/[─━│┃┄┅┆┇┈┉┊┋┌┍┎┏┐┑┒┓└┕┖┗┘┙┚┛├┝┞┟┠┡┢┣┤┥┦┧┨┩┪┫┬┬┭┮┯┰┱┲┳┴┵┶┷┸┹┺┻┼┽┾┿╀╁╂╃╄╅╆╇╈╉╊╋]+/g, '')
+      .replace(/[─━│┃┄┅┆┇┈┉┊┋┌┍┎┏┐┑┒┓└┕┖┗┘┙┚┛├┝┞┟┠┡┢┣┤┥┦┧┨┩┪┫┬┭┮┯┰┱┲┳┴┵┶┷┸┹┺┻┼┽┾┿╀╁╂╃╄╅╆╇╈╉╊╋]+/g, '')
       .replace(/[◆◇◈◉◊○◌◍◎●◐◑◒◓◔◕◖◗◘◙◚◛]+/g, '')
       .replace(/[♠♣♥♦♩♪♫♬♭♮♯]+/g, '')
       .replace(/[→←↑↓↔↕↖↗↘↙]+/g, '')
@@ -378,58 +371,75 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       .replace(/[\u{1F300}-\u{1F5FF}]/gu, '')
       .replace(/[\u{1F680}-\u{1F6FF}]/gu, '')
       .replace(/[\u{1F1E0}-\u{1F1FF}]/gu, '');
-    
+
+    // 5. Limpieza de caracteres de control invisibles
     cleaned = cleaned
       .replace(/[\u0000-\u001F\u007F-\u009F]/g, '')
       .replace(/[\u200B-\u200D\uFEFF]/g, '')
-      .replace(/[\u2028\u2029]/g, '\n');
-    
+      .replace(/[\u2028\u2029]/g, ' ');
+
+    // 6. Reemplazo de abreviaturas comunes
+    // CORRECCIÓN CRÍTICA: Se eliminó 'EN': 'Inglés' para evitar que diga esa palabra.
     const customReplacements: { [key: string]: string } = {
-      'TL': 'Traducción', 'EN': 'Inglés', 'JP': 'Japonés', 'CN': 'Chino', 'KR': 'Coreano',
-      'T/N': 'Nota del traductor', 'N/T': 'Nota del traductor', 'A/N': 'Nota del autor',
-      'N/A': 'Nota del autor', 'ED': 'Edición', 'PR': 'Prologo', 'EP': 'Epilogo',
+      'TL': 'Traducción', 
+      'JP': 'Japonés', 
+      'CN': 'Chino', 
+      'KR': 'Coreano',
+      'T/N': 'Nota del traductor', 
+      'N/T': 'Nota del traductor', 
+      'A/N': 'Nota del autor',
+      'N/A': 'Nota del autor', 
+      'ED': 'Edición', 
+      'PR': 'Prólogo', 
+      'EP': 'Epílogo',
+      // 'EN' se deja intacto o se puede poner '' si quieres borrarlo, pero NO convertirlo a 'Inglés'
     };
     
     Object.entries(customReplacements).forEach(([key, value]) => {
       const regex = new RegExp(`\\b${key}\\b`, 'gi');
       cleaned = cleaned.replace(regex, value);
     });
-    
+
+    // 7. Normalización final de espacios y puntuación
     cleaned = cleaned
-      .replace(/\s+/g, ' ')
-      .replace(/\s+([.,!?;:])/g, '$1')
-      .replace(/([.,!?;:])\s*([.,!?;:])/g, '$1')
-      .replace(/^\s+|\s+$/g, '')
+      .replace(/\s+/g, ' ') // Múltiples espacios a uno
+      .replace(/\s+([.,!?;:])/g, '$1') // Espacio antes de puntuación
+      .replace(/([.,!?;:])\s*([.,!?;:])/g, '$1') // Puntuación duplicada
+      .replace(/^\s+|\s+$/g, '') // Trim inicial/final
       .trim();
-    
+
     if (cleaned.length < 2) return '';
     return cleaned;
   };
 
   const speakText = (text: string) => {
-    // Limpieza de respaldo en React Native
+    // Prevención de superposición
+    if (isSpeakingRef.current) {
+      Speech.stop();
+    }
+    isSpeakingRef.current = true;
+
     let processedText = cleanTextForTTS(text);
-    
+
     // Limpieza agresiva final específica para caracteres de escape
     processedText = processedText
-      .replace(/\\/g, '')       
-      .replace(/""/g, '"')      
-      .replace(/\\'/g, "'")     
-      .replace(/\\"/g, '"')     
-      .replace(/[`]/g, '')      
-      .replace(/\s+/g, ' ')     
+      .replace(/\\/g, '')
+      .replace(/""/g, '"')
+      .replace(/\\'/g, "'")
+      .replace(/\\"/g, '"')
+      .replace(/[`]/g, '')
+      .replace(/\s+/g, ' ')
       .trim();
 
     if (!processedText || processedText.length < 2) {
-      // Si el texto está vacío, saltar al siguiente sin hablar pero manteniendo la sincronía
       const handleEmptyText = () => {
+        isSpeakingRef.current = false;
         const isBackground = appStateRef.current === 'background' || appStateRef.current === 'inactive';
         if (ttsQueueRef.current.length > 0 && ttsQueueIndexRef.current + 1 < ttsQueueRef.current.length) {
           const nextIndex = ttsQueueIndexRef.current + 1;
           const nextText = ttsQueueRef.current[nextIndex];
           if (nextText) {
             ttsQueueIndexRef.current = nextIndex;
-            // Sincronizar UI antes de continuar
             webViewRef.current?.injectJavaScript(`
               if(window.tts) {
                 tts.elementsRead = ${nextIndex};
@@ -461,38 +471,33 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       setTimeout(handleEmptyText, 50);
       return;
     }
-    
+
+    const selectedVoice = readerSettingsRef.current.tts?.voice;
+
+    // SOLUCIÓN RADICAL: NO PASAR 'language' NUNCA.
+    // Al omitir esta propiedad, Android usa la configuración regional del dispositivo
+    // y la voz seleccionada sin intentar cambiar de paquete ni anunciar idiomas.
     Speech.speak(processedText, {
       onDone() {
+        isSpeakingRef.current = false;
         const isBackground = appStateRef.current === 'background' || appStateRef.current === 'inactive';
-        
-        // LOGICA CRÍTICA DE SINCRONIZACIÓN
-        // Antes de pasar al siguiente, aseguramos que el índice esté actualizado
         const currentIndex = ttsQueueIndexRef.current;
-        
+
         if (ttsQueueRef.current.length > 0 && currentIndex + 1 < ttsQueueRef.current.length) {
           const nextIndex = currentIndex + 1;
           const nextText = ttsQueueRef.current[nextIndex];
-          
+
           if (nextText) {
-            // 1. Actualizar referencia
             ttsQueueIndexRef.current = nextIndex;
             
-            // 2. FORZAR actualización visual en el WebView ANTES de hablar
-            // Esto soluciona el problema del recuadro estancado
             webViewRef.current?.injectJavaScript(`
               (function() {
                 if(window.tts && window.tts.allReadableElements) {
                   var idx = ${nextIndex};
                   if(idx < tts.allReadableElements.length) {
-                    // Remover highlight anterior
                     if(tts.currentElement) tts.currentElement.classList.remove('highlight');
-                    
-                    // Actualizar estado interno
                     tts.elementsRead = idx;
                     tts.currentElement = tts.allReadableElements[idx];
-                    
-                    // Aplicar nuevo highlight y scroll
                     if(tts.currentElement) {
                       tts.currentElement.classList.add('highlight');
                       tts.scrollToElement(tts.currentElement);
@@ -500,16 +505,14 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
                   }
                 }
               })();
-              true; // Requerido para injectJavaScript
+              true;
             `);
             
-            // 3. Hablar
             speakText(nextText);
             return;
           }
         }
-        
-        // Fin de la cola
+
         if (ttsQueueRef.current.length > 0 && nextChapter) {
           autoStartTTSRef.current = true;
           navigateChapter('NEXT');
@@ -524,17 +527,32 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
         }
         webViewRef.current?.injectJavaScript('tts.next?.()');
       },
-      voice: readerSettingsRef.current.tts?.voice?.identifier,
+      onError(e) {
+        console.warn('TTS Error:', e);
+        isSpeakingRef.current = false;
+        
+        const currentIndex = ttsQueueIndexRef.current;
+        if (ttsQueueRef.current.length > 0 && currentIndex + 1 < ttsQueueRef.current.length) {
+           const nextIndex = currentIndex + 1;
+           const nextText = ttsQueueRef.current[nextIndex];
+           if(nextText) {
+             ttsQueueIndexRef.current = nextIndex;
+             speakText(nextText);
+             return;
+           }
+        }
+        webViewRef.current?.injectJavaScript('tts.next?.()');
+      },
+      voice: selectedVoice?.identifier,
       pitch: readerSettingsRef.current.tts?.pitch || 1,
       rate: readerSettingsRef.current.tts?.rate || 1,
-      language: readerSettingsRef.current.tts?.voice?.language || 'en-US',
+      // language: ELIMINADO INTENCIONALMENTE para evitar anuncios de idioma.
     });
   };
 
   const isRTL = plugin?.lang === 'Arabic' || plugin?.lang === 'Hebrew';
   const readerDir = isRTL ? 'rtl' : 'ltr';
 
-  // Script de limpieza INYECTADO en el WebView
   const cleanupScript = `
     (function() {
       if (window.reader && window.reader.post) {
@@ -575,7 +593,6 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
           }`,
         );
         
-        // Inyectar script de limpieza
         webViewRef.current?.injectJavaScript(cleanupScript);
 
         if (autoStartTTSRef.current) {
@@ -615,7 +632,6 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
             if (typeof payload?.startIndex === 'number') {
               ttsQueueIndexRef.current = payload.startIndex;
               
-              // Sincronizar UI inicial cuando se recibe la cola
               setTimeout(() => {
                  webViewRef.current?.injectJavaScript(`
                   if(window.tts && window.tts.allReadableElements) {
@@ -695,9 +711,11 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
             break;
           case 'pause-speak':
             Speech.stop();
+            isSpeakingRef.current = false;
             break;
           case 'stop-speak':
             Speech.stop();
+            isSpeakingRef.current = false;
             if (BackgroundService) {
               BackgroundService.stop().catch(() => {});
             }
