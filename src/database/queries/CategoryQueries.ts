@@ -232,15 +232,9 @@ export const _restoreCategory = async (
 
     // Insert novel-category associations
     if (category.novelIds && category.novelIds.length > 0) {
-      for (const novelId of category.novelIds) {
-        await tx
-          .insert(novelCategorySchema)
-          .values({
-            categoryId: category.id,
-            novelId: novelId,
-          })
-          .onConflictDoNothing()
-          .run();
+      const values = category.novelIds.map(novelId => ({ categoryId: category.id, novelId }));
+      if (values.length) {
+        await tx.insert(novelCategorySchema).values(values).onConflictDoNothing().run();
       }
     }
   });

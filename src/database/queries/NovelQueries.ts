@@ -1,5 +1,5 @@
 import * as DocumentPicker from 'expo-document-picker';
-import { eq, and, sql, inArray, ne } from 'drizzle-orm';
+import { eq, and, inArray, ne } from 'drizzle-orm';
 
 import { fetchNovel } from '@services/plugin/fetch';
 import { insertChapters } from './ChapterQueries';
@@ -347,14 +347,15 @@ export const updateNovelCategoryById = async (
   novelId: number,
   categoryIds: number[],
 ) => {
+  if (!categoryIds.length) return;
+
   await dbManager.write(async tx => {
-    for (const categoryId of categoryIds) {
-      await tx
-        .insert(novelCategorySchema)
-        .values({ novelId, categoryId })
-        .onConflictDoNothing()
-        .run();
-    }
+    const values = categoryIds.map(categoryId => ({ novelId, categoryId }));
+    await tx
+      .insert(novelCategorySchema)
+      .values(values)
+      .onConflictDoNothing()
+      .run();
   });
 };
 
@@ -380,14 +381,18 @@ export const updateNovelCategories = async (
       .run();
 
     if (categoryIds.length) {
+      const values: Array<{ novelId: number; categoryId: number }> = [];
       for (const novelId of novelIds) {
         for (const categoryId of categoryIds) {
-          await tx
-            .insert(novelCategorySchema)
-            .values({ novelId, categoryId })
-            .onConflictDoNothing()
-            .run();
+          values.push({ novelId, categoryId });
         }
+      }
+      if (values.length) {
+        await tx
+          .insert(novelCategorySchema)
+          .values(values)
+          .onConflictDoNothing()
+          .run();
       }
     } else {
       // If no category is selected, set to the default category (sort = 1)
@@ -398,23 +403,19 @@ export const updateNovelCategories = async (
         .get();
 
       if (defaultCategory) {
-        for (const novelId of novelIds) {
-          // Check if it already has some category (e.g. local)
-          const hasCategory = await tx
-            .select({ count: sql<number>`count(*)` })
-            .from(novelCategorySchema)
-            .where(eq(novelCategorySchema.novelId, novelId))
-            .get();
+        // Find which novels already have any category
+        const existing = await tx
+          .select({ novelId: novelCategorySchema.novelId })
+          .from(novelCategorySchema)
+          .where(inArray(novelCategorySchema.novelId, novelIds))
+          .all();
 
-          if (!hasCategory || hasCategory.count === 0) {
-            await tx
-              .insert(novelCategorySchema)
-              .values({
-                novelId: novelId,
-                categoryId: defaultCategory.id,
-              })
-              .run();
-          }
+        const existingSet = new Set(existing.map(r => r.novelId));
+        const missing = novelIds.filter(nid => !existingSet.has(nid));
+
+        if (missing.length) {
+          const values = missing.map(novelId => ({ novelId, categoryId: defaultCategory.id }));
+          await tx.insert(novelCategorySchema).values(values).run();
         }
       }
     }
