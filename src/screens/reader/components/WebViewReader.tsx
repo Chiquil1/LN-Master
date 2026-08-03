@@ -33,12 +33,12 @@ import { getBatteryLevelSync } from 'react-native-device-info';
 import * as Speech from 'expo-speech';
 import { PLUGIN_STORAGE } from '@utils/Storages';
 import { useChapterContext } from '../ChapterContext';
+import { useTTSStore } from '@hooks/useTTSStore';
 import {
   showTTSNotification,
   updateTTSNotification,
   updateTTSPlaybackState,
   updateTTSProgress,
-  dismissTTSNotification,
   ttsMediaEmitter,
 } from '@utils/ttsNotification';
 
@@ -112,11 +112,23 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
   const isTTSReadingRef = useRef<boolean>(false);
   const readerSettingsRef = useRef<ChapterReaderSettings>(readerSettings);
   const appStateRef = useRef(AppState.currentState);
-  const ttsQueueRef = useRef<string[]>([]);
-  const ttsQueueIndexRef = useRef<number>(0);
   const isSpeakingRef = useRef<boolean>(false);
   // Ref para evitar múltiples disparos de cambio de capítulo
   const isTransitioningRef = useRef<boolean>(false);
+
+  const {
+    queue: ttsQueue,
+    currentChapterIndex: ttsCurrentChapterIndex,
+    setQueue: setTTSQueue,
+    clearQueue: clearTTSQueue,
+    setCurrentChapterIndex: setTTSCurrentChapterIndex,
+    setIsPlaying: setTTSIsPlaying,
+    updateCurrentItemCurrentIndex,
+  } = useTTSStore();
+
+  const currentTTSItem = ttsQueue[ttsCurrentChapterIndex];
+  const currentTTSIndex = currentTTSItem?.currentIndex ?? 0;
+  const currentTTSSegments = currentTTSItem?.textSegments ?? [];
 
   const veryIntensiveTask = async () => {
     await new Promise(() => {});
@@ -287,7 +299,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
     const subscription = AppState.addEventListener('change', nextState => {
       appStateRef.current = nextState;
       if (nextState === 'active' && isTTSReadingRef.current) {
-        const index = ttsQueueIndexRef.current;
+        const index = currentTTSIndex;
         webViewRef.current?.injectJavaScript(`
           if (window.tts && window.tts.allReadableElements) {
             const idx = ${index};
@@ -448,11 +460,11 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
         const isBackground = appStateRef.current === 'background' || appStateRef.current === 'inactive';
         
         // Verificar si hay más texto en la cola actual
-        if (ttsQueueRef.current.length > 0 && ttsQueueIndexRef.current + 1 < ttsQueueRef.current.length) {
-          const nextIndex = ttsQueueIndexRef.current + 1;
-          const nextText = ttsQueueRef.current[nextIndex];
+        if (currentTTSSegments.length > 0 && currentTTSIndex + 1 < currentTTSSegments.length) {
+          const nextIndex = currentTTSIndex + 1;
+          const nextText = currentTTSSegments[nextIndex];
           if (nextText) {
-            ttsQueueIndexRef.current = nextIndex;
+            updateCurrentItemCurrentIndex(nextIndex);
             webViewRef.current?.injectJavaScript(`
               if(window.tts) {
                 tts.elementsRead = ${nextIndex};
@@ -503,14 +515,14 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       onDone() {
         isSpeakingRef.current = false;
         const isBackground = appStateRef.current === 'background' || appStateRef.current === 'inactive';
-        const currentIndex = ttsQueueIndexRef.current;
+        const currentIndex = currentTTSIndex;
 
-        if (ttsQueueRef.current.length > 0 && currentIndex + 1 < ttsQueueRef.current.length) {
+        if (currentTTSSegments.length > 0 && currentIndex + 1 < currentTTSSegments.length) {
           const nextIndex = currentIndex + 1;
-          const nextText = ttsQueueRef.current[nextIndex];
+          const nextText = currentTTSSegments[nextIndex];
 
           if (nextText) {
-            ttsQueueIndexRef.current = nextIndex;
+            updateCurrentItemCurrentIndex(nextIndex);
             
             webViewRef.current?.injectJavaScript(`
               (function() {
@@ -558,12 +570,12 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
         console.warn('TTS Error:', e);
         isSpeakingRef.current = false;
         
-        const currentIndex = ttsQueueIndexRef.current;
-        if (ttsQueueRef.current.length > 0 && currentIndex + 1 < ttsQueueRef.current.length) {
+        const currentIndex = currentTTSIndex;
+        if (currentTTSSegments.length > 0 && currentIndex + 1 < currentTTSSegments.length) {
            const nextIndex = currentIndex + 1;
-           const nextText = ttsQueueRef.current[nextIndex];
+           const nextText = currentTTSSegments[nextIndex];
            if(nextText) {
-             ttsQueueIndexRef.current = nextIndex;
+             updateCurrentItemCurrentIndex(nextIndex);
              speakText(nextText);
              return;
            }
@@ -657,28 +669,34 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
                     typeof item === 'string' && item.trim().length > 0,
                 )
               : [];
-            ttsQueueRef.current = queue;
-            if (typeof payload?.startIndex === 'number') {
-              ttsQueueIndexRef.current = payload.startIndex;
-              
-              setTimeout(() => {
-                 webViewRef.current?.injectJavaScript(`
-                  if(window.tts && window.tts.allReadableElements) {
-                    var idx = ${payload.startIndex};
-                    if(idx < tts.allReadableElements.length) {
-                      tts.elementsRead = idx;
-                      tts.currentElement = tts.allReadableElements[idx];
-                      if(tts.currentElement) {
-                        tts.currentElement.classList.add('highlight');
-                        tts.scrollToElement(tts.currentElement);
-                      }
+            const initialIndex =
+              typeof payload?.startIndex === 'number' ? payload.startIndex : 0;
+            setTTSQueue([
+              {
+                chapterId: chapter.id,
+                chapterName: chapter.name,
+                novelId: novel.id,
+                textSegments: queue,
+                currentIndex: initialIndex,
+              },
+            ]);
+            setTTSCurrentChapterIndex(0);
+
+            setTimeout(() => {
+              webViewRef.current?.injectJavaScript(`
+                if(window.tts && window.tts.allReadableElements) {
+                  var idx = ${initialIndex};
+                  if(idx < tts.allReadableElements.length) {
+                    tts.elementsRead = idx;
+                    tts.currentElement = tts.allReadableElements[idx];
+                    if(tts.currentElement) {
+                      tts.currentElement.classList.add('highlight');
+                      tts.scrollToElement(tts.currentElement);
                     }
                   }
-                 `);
-              }, 100);
-            } else {
-              ttsQueueIndexRef.current = 0;
-            }
+                }
+              `);
+            }, 100);
             break;
           }
           case 'hide':
@@ -705,10 +723,11 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
           case 'speak':
             if (event.data && typeof event.data === 'string') {
               if (typeof event.index === 'number') {
-                ttsQueueIndexRef.current = event.index;
+                updateCurrentItemCurrentIndex(event.index);
               }
               if (!isTTSReadingRef.current) {
                 isTTSReadingRef.current = true;
+                setTTSIsPlaying(true);
                 if (BackgroundService) {
                   BackgroundService.start(veryIntensiveTask, backgroundOptions).catch(() => {});
                 }
@@ -750,8 +769,8 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
             }
             if (!autoStartTTSRef.current) {
               isTTSReadingRef.current = false;
-              ttsQueueRef.current = [];
-              ttsQueueIndexRef.current = 0;
+              clearTTSQueue();
+              setTTSCurrentChapterIndex(0);
               updateTTSPlaybackState(false);
             }
             break;
