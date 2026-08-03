@@ -6,7 +6,7 @@ export function getMMKVObject<T = unknown>(key: string): T | undefined {
   if (!data) return undefined;
   try {
     return JSON.parse(data) as T;
-  } catch (err) {
+  } catch {
     // If parsing fails, return undefined to avoid throws from corrupted data
     return undefined;
   }

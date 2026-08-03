@@ -34,17 +34,15 @@ export const useTTSStore = create<TTSState>()(
       isPlaying: false,
       isLoadingNext: false,
       setQueue: (newQueue: TTSQueueItem[], currentChapterIndex = 0): void => {
-        void set({ queue: newQueue, currentChapterIndex });
-        return;
+        set({ queue: newQueue, currentChapterIndex });
       },
       addQueueItem: (item: TTSQueueItem): void => {
-        void set(state => ({ queue: [...state.queue, item] }));
-        return;
+        set(state => ({ queue: [...state.queue, item] }));
       },
-      clearQueue: (): void => { void set({ queue: [], currentChapterIndex: 0 }); },
-      setCurrentChapterIndex: (index: number): void => { void set({ currentChapterIndex: index }); },
-      setIsPlaying: (value: boolean): void => { void set({ isPlaying: value }); },
-      setIsLoadingNext: (value: boolean): void => { void set({ isLoadingNext: value }); },
+      clearQueue: (): void => { set({ queue: [], currentChapterIndex: 0 }); },
+      setCurrentChapterIndex: (index: number): void => { set({ currentChapterIndex: index }); },
+      setIsPlaying: (value: boolean): void => { set({ isPlaying: value }); },
+      setIsLoadingNext: (value: boolean): void => { set({ isLoadingNext: value }); },
       updateCurrentItemCurrentIndex: (index: number): void => {
         const state = get();
         const currentChapterIndex = state.currentChapterIndex;
@@ -62,8 +60,7 @@ export const useTTSStore = create<TTSState>()(
           ...currentItem,
           currentIndex: index,
         };
-        void set({ queue: updatedQueue });
-        return;
+        set({ queue: updatedQueue });
       },
       advanceSegment: (): boolean => {
         const state = get();
@@ -78,7 +75,7 @@ export const useTTSStore = create<TTSState>()(
             ...item,
             currentIndex: item.currentIndex + 1,
           };
-          void set({ queue: updatedQueue });
+          set({ queue: updatedQueue });
           return true;
         }
         return false;
@@ -87,7 +84,7 @@ export const useTTSStore = create<TTSState>()(
         const state = get();
         const nextChapterIndex = state.currentChapterIndex + 1;
         if (nextChapterIndex < state.queue.length) {
-          void set({ currentChapterIndex: nextChapterIndex });
+          set({ currentChapterIndex: nextChapterIndex });
           return true;
         }
         return false;
@@ -102,7 +99,7 @@ export const useTTSStore = create<TTSState>()(
           // Use typed helper to avoid `any` cast spread across the codebase
           try {
             // lazy import to avoid circular imports
-            // eslint-disable-next-line @typescript-eslint/no-var-requires
+             
             const { deleteMMKVKey } = require('@utils/mmkv/mmkv');
             deleteMMKVKey(name);
           } catch {

@@ -302,7 +302,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
     });
 
     return () => subscription.remove();
-  }, [webViewRef]);
+  }, [webViewRef, currentTTSIndex]);
 
   // Función para limpiar texto antes de enviarlo al TTS
   const cleanTextForTTS = (text: string): string => {
@@ -384,10 +384,17 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       .replace(/[\u{1F1E0}-\u{1F1FF}]/gu, '');
 
     // 5. Limpieza de caracteres de control invisibles
-    cleaned = cleaned
-      .replace(/[\u0000-\u001F\u007F-\u009F]/g, '')
-      .replace(/[\u200B-\u200D\uFEFF]/g, '')
-      .replace(/[\u2028\u2029]/g, ' ');
+    // Remove control characters by character code to avoid control-regex warnings
+    const filtered = Array.from(cleaned)
+      .filter(ch => {
+        const code = ch.charCodeAt(0);
+        if (code >= 0 && code <= 31) return false;
+        if (code >= 127 && code <= 159) return false;
+        if (code === 0x200B || code === 0x200C || code === 0x200D || code === 0xFEFF) return false;
+        return true;
+      })
+      .join('');
+    cleaned = filtered.replace(/\u2028|\u2029/g, ' ');
 
     // 6. Reemplazo de abreviaturas comunes
     const customReplacements: { [key: string]: string } = {

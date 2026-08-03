@@ -241,7 +241,7 @@ const updateNovel = async (
                 downloadNewChapters,
                 String(pageNum),
               );
-            } catch (e) {
+            } catch {
               // ignore page-level failures
             }
           }),

@@ -146,7 +146,7 @@ export const importEpub = async (
       let chapterText = '';
       try {
         chapterText = NativeFile.readFile(decodePath(chapter.path));
-      } catch (e) {
+      } catch {
         chapterText = '';
       }
       if (!chapterText) {
