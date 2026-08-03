@@ -8,14 +8,6 @@ import {
 import WebView from 'react-native-webview';
 import color from 'color';
 
-// Import seguro de BackgroundService
-let BackgroundService: any = null;
-try {
-  BackgroundService = require('react-native-background-actions').default;
-} catch (e) {
-  console.warn('BackgroundService not available:', e);
-}
-
 import { useTheme } from '@hooks/persisted';
 import { getString } from '@strings/translations';
 
@@ -41,6 +33,10 @@ import {
   updateTTSProgress,
   ttsMediaEmitter,
 } from '@utils/ttsNotification';
+import {
+  registerTTSWebView,
+  unregisterTTSWebView,
+} from '@utils/ttsService';
 
 type WebViewPostEvent = {
   type: string;
@@ -130,26 +126,17 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
   const currentTTSIndex = currentTTSItem?.currentIndex ?? 0;
   const currentTTSSegments = currentTTSItem?.textSegments ?? [];
 
-  const veryIntensiveTask = async () => {
-    await new Promise(() => {});
-  };
-
-  const backgroundOptions = {
-    taskName: 'LNReader TTS',
-    taskTitle: 'LN Reader - Reproduciendo',
-    taskDesc: 'Leyendo en voz alta',
-    taskIcon: {
-      name: 'ic_launcher',
-      type: 'mipmap',
-    },
-    color: '#ff00ff',
-    linkingURI: 'lnreader://',
-    parameters: {},
-  };
 
   useEffect(() => {
     readerSettingsRef.current = readerSettings;
   }, [readerSettings]);
+
+  useEffect(() => {
+    registerTTSWebView(webViewRef);
+    return () => {
+      unregisterTTSWebView();
+    };
+  }, [webViewRef]);
 
   useEffect(() => {
     const playListener = ttsMediaEmitter.addListener('TTSPlay', () => {
@@ -232,9 +219,6 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
     return () => {
       if (!isTTSReadingRef.current) {
         updateTTSPlaybackState(false);
-      }
-      if (BackgroundService) {
-        BackgroundService.stop().catch(() => {});
       }
       Speech.stop();
       isSpeakingRef.current = false;
@@ -480,24 +464,18 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
           }
         }
 
-        // CAMBIO PRINCIPAL: Automatización de cambio de capítulo
-        // Si la cola terminó Y hay un siguiente capítulo Y no estamos ya transitando
         if (nextChapter && !isTransitioningRef.current) {
-          isTransitioningRef.current = true; // Bloquear múltiples llamadas
-          autoStartTTSRef.current = true;    // Activar auto-reproducción en el nuevo capítulo
-          
-          // Pequeña pausa para asegurar que la UI se actualice
-          setTimeout(() => {
-            navigateChapter('NEXT');
-          }, 200);
+          console.log('[TTS] Capítulo terminado, navegando al siguiente');
+          isTransitioningRef.current = true;
+          autoStartTTSRef.current = true;
+          setTimeout(() => navigateChapter('NEXT'), 200);
           return;
         }
 
-        // Si no hay siguiente capítulo y está en segundo plano, solo pausar (no eliminar notificación)
         if (isBackground) {
+          console.log('[TTS] Capítulo terminado y app en background, deteniendo reproducción');
           isTTSReadingRef.current = false;
-          if (BackgroundService) BackgroundService.stop().catch(() => {});
-          updateTTSPlaybackState(false);
+          setTTSIsPlaying(false);
           webViewRef.current?.injectJavaScript('tts.stop?.()');
           return;
         }
@@ -547,19 +525,18 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
           }
         }
 
-        // CAMBIO PRINCIPAL: Lógica duplicada en onDone por seguridad
         if (nextChapter && !isTransitioningRef.current) {
+          console.log('[TTS] Capítulo terminado, navegando al siguiente');
           isTransitioningRef.current = true;
           autoStartTTSRef.current = true;
-          setTimeout(() => {
-            navigateChapter('NEXT');
-          }, 200);
+          setTimeout(() => navigateChapter('NEXT'), 200);
           return;
         }
 
         if (isBackground) {
+          console.log('[TTS] Capítulo terminado y app en background, deteniendo reproducción');
           isTTSReadingRef.current = false;
-          if (BackgroundService) BackgroundService.stop().catch(() => {});
+          setTTSIsPlaying(false);
           updateTTSPlaybackState(false);
           webViewRef.current?.injectJavaScript('tts.stop?.()');
           return;
@@ -728,9 +705,6 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
               if (!isTTSReadingRef.current) {
                 isTTSReadingRef.current = true;
                 setTTSIsPlaying(true);
-                if (BackgroundService) {
-                  BackgroundService.start(veryIntensiveTask, backgroundOptions).catch(() => {});
-                }
                 showTTSNotification({
                   novelName: novel?.name || 'Unknown',
                   chapterName: chapter.name,
@@ -764,11 +738,9 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
           case 'stop-speak':
             Speech.stop();
             isSpeakingRef.current = false;
-            if (BackgroundService) {
-              BackgroundService.stop().catch(() => {});
-            }
             if (!autoStartTTSRef.current) {
               isTTSReadingRef.current = false;
+              setTTSIsPlaying(false);
               clearTTSQueue();
               setTTSCurrentChapterIndex(0);
               updateTTSPlaybackState(false);

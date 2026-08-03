@@ -7,6 +7,7 @@ import {
   changeNavigationBarColor,
   setStatusBarColor,
 } from '@theme/utils/setBarColor';
+import { navigationRef } from './RootNavigation';
 import { useAppSettings, usePlugins, useTheme } from '@hooks/persisted';
 import { useGithubUpdateChecker } from '@hooks/common/useGithubUpdateChecker';
 
@@ -76,6 +77,7 @@ const MainNavigator = () => {
 
   return (
     <NavigationContainer<RootStackParamList>
+      ref={navigationRef}
       theme={{
         colors: {
           ...DefaultTheme.colors,

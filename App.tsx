@@ -19,6 +19,8 @@ import Main from './src/navigators/Main';
 import { BottomSheetModalProvider } from '@gorhom/bottom-sheet';
 import { useInitDatabase } from '@database/db';
 import { ThemeProvider } from '@hooks/persisted/useTheme';
+import TTSMiniPlayer from './src/components/TTSMiniPlayer';
+import TTSPlayerService from './src/components/TTSPlayerService';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => {
@@ -53,9 +55,11 @@ const App = () => {
             <ThemeProvider>
               <PaperProvider>
                 <BottomSheetModalProvider>
-                  <StatusBar translucent={true} backgroundColor="transparent" />
-                  <Main />
-                </BottomSheetModalProvider>
+                <StatusBar translucent={true} backgroundColor="transparent" />
+                <Main />
+                <TTSPlayerService />
+                <TTSMiniPlayer />
+              </BottomSheetModalProvider>
               </PaperProvider>
             </ThemeProvider>
           </SafeAreaProvider>
