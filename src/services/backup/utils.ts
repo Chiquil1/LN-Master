@@ -36,25 +36,37 @@ const backupMMKVData = () => {
   const keys = MMKVStorage.getAllKeys().filter(
     key => !excludeKeys.includes(key),
   );
-  const data = {} as any;
+  type BackupSettings = Record<string, string | number | boolean>;
+  const data: BackupSettings = {};
   for (const key of keys) {
     let value: number | string | boolean | undefined =
       MMKVStorage.getString(key);
-    if (!value) {
+    if (value === undefined) {
       value = MMKVStorage.getBoolean(key);
     }
-    if (key && value) {
+    if (key && value !== undefined) {
       data[key] = value;
     }
   }
   return data;
 };
 
-const restoreMMKVData = (data: any) => {
+const restoreMMKVData = (data: Record<string, string | number | boolean>) => {
   for (const key in data) {
-    MMKVStorage.set(key, data[key]);
+    MMKVStorage.set(key, data[key] as string | number | boolean);
   }
 };
+
+function getErrorMessage(error: unknown): string {
+  if (!error) return String(error);
+  if (typeof error === 'string') return error;
+  if (error instanceof Error) return error.message;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
 
 export const prepareBackupData = async (cacheDirPath: string) => {
   const novelDirPath = cacheDirPath + '/' + BackupEntryName.NOVEL_AND_CHAPTERS;
@@ -70,10 +82,11 @@ export const prepareBackupData = async (cacheDirPath: string) => {
       cacheDirPath + '/' + BackupEntryName.VERSION,
       JSON.stringify({ version: version }),
     );
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const msg = getErrorMessage(error);
     showToast(
       getString('backupScreen.versionFileWriteFailed', {
-        error: error?.message || String(error),
+        error: msg,
       }),
     );
     throw error;
@@ -92,11 +105,11 @@ export const prepareBackupData = async (cacheDirPath: string) => {
             cover: novel.cover?.replace(APP_STORAGE_URI, ''),
           }),
         );
-      } catch (error: any) {
+      } catch (error: unknown) {
         showToast(
           getString('backupScreen.novelBackupFailed', {
             novelName: novel.name,
-            error: error?.message,
+            error: getErrorMessage(error),
           }),
         );
       }
@@ -120,10 +133,10 @@ export const prepareBackupData = async (cacheDirPath: string) => {
         }),
       ),
     );
-  } catch (error: any) {
+  } catch (error: unknown) {
     showToast(
       getString('backupScreen.categoryFileWriteFailed', {
-        error: error?.message || String(error),
+        error: getErrorMessage(error),
       }),
     );
   }
@@ -134,10 +147,10 @@ export const prepareBackupData = async (cacheDirPath: string) => {
       cacheDirPath + '/' + BackupEntryName.SETTING,
       JSON.stringify(backupMMKVData()),
     );
-  } catch (error: any) {
+  } catch (error: unknown) {
     showToast(
       getString('backupScreen.settingsFileWriteFailed', {
-        error: error?.message || String(error),
+        error: getErrorMessage(error),
       }),
     );
   }
@@ -171,23 +184,23 @@ export const restoreData = async (cacheDirPath: string) => {
 
             await _restoreNovelAndChapters(backupNovel);
             novelCount++;
-          } catch (error: any) {
-            failedCount++;
-            const novelName =
-              item.path.split('/').pop()?.replace('.json', '') || 'Unknown';
-            showToast(
-              getString('backupScreen.novelRestoreFailed', {
-                novelName: novelName,
-                error: error?.message || String(error),
-              }),
-            );
-          }
+              } catch (error: unknown) {
+                failedCount++;
+                const novelName =
+                  item.path.split('/').pop()?.replace('.json', '') || 'Unknown';
+                showToast(
+                  getString('backupScreen.novelRestoreFailed', {
+                    novelName: novelName,
+                    error: getErrorMessage(error),
+                  }),
+                );
+              }
         }
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       showToast(
         getString('backupScreen.novelDirectoryReadFailed', {
-          error: error?.message || String(error),
+          error: getErrorMessage(error),
         }),
       );
     }
@@ -220,20 +233,20 @@ export const restoreData = async (cacheDirPath: string) => {
         try {
           _restoreCategory(category);
           categoryCount++;
-        } catch (error: any) {
-          failedCategoryCount++;
-          showToast(
-            getString('backupScreen.categoryRestoreFailed', {
-              categoryName: category.name || category.id.toString(),
-              error: error?.message || String(error),
-            }),
-          );
-        }
+            } catch (error: unknown) {
+              failedCategoryCount++;
+              showToast(
+                getString('backupScreen.categoryRestoreFailed', {
+                  categoryName: category.name || category.id.toString(),
+                  error: getErrorMessage(error),
+                }),
+              );
+            }
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       showToast(
         getString('backupScreen.categoryFileReadFailed', {
-          error: error?.message || String(error),
+          error: getErrorMessage(error),
         }),
       );
     }
@@ -265,10 +278,10 @@ export const restoreData = async (cacheDirPath: string) => {
       const settingsData = JSON.parse(fileContent);
       restoreMMKVData(settingsData);
       showToast(getString('backupScreen.settingsRestored'));
-    } catch (error: any) {
+    } catch (error: unknown) {
       showToast(
         getString('backupScreen.settingsRestoreFailed', {
-          error: error?.message || String(error),
+          error: getErrorMessage(error),
         }),
       );
     }

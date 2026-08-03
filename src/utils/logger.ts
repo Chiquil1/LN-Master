@@ -1,25 +1,26 @@
-const isDev = (globalThis as any).__DEV__ === true;
+type DevGlobal = typeof globalThis & { __DEV__?: boolean };
+const isDev = (globalThis as DevGlobal).__DEV__ === true;
 
 export const logger = {
-  debug: (...args: any[]) => {
+  debug: (...args: unknown[]) => {
     if (isDev) {
       // eslint-disable-next-line no-console
-      console.debug(...args);
+      console.debug(...(args as unknown[]));
     }
   },
-  info: (...args: any[]) => {
+  info: (...args: unknown[]) => {
     if (isDev) {
       // eslint-disable-next-line no-console
-      console.info(...args);
+      console.info(...(args as unknown[]));
     }
   },
-  warn: (...args: any[]) => {
+  warn: (...args: unknown[]) => {
     // eslint-disable-next-line no-console
-    console.warn(...args);
+    console.warn(...(args as unknown[]));
   },
-  error: (...args: any[]) => {
+  error: (...args: unknown[]) => {
     // eslint-disable-next-line no-console
-    console.error(...args);
+    console.error(...(args as unknown[]));
   },
 };
 

@@ -59,7 +59,10 @@ const CoverImage = memo(
     );
 
     if (hideBackdrop) {
-      return <View>{children}</View>;
+      const onlyText = React.Children.toArray(children).every(
+        c => typeof c === 'string' || typeof c === 'number',
+      );
+      return <View>{onlyText ? <Text>{children}</Text> : children}</View>;
     }
     return (
       <ImageBackground source={source} style={styles.coverImage}>

@@ -77,7 +77,7 @@ class DbManager implements IDbManager {
     query: T,
   ): Awaited<ReturnType<T['get']>> {
     const { sql: sqlString, params } = query.toSQL();
-    return this.db.$client.executeSync(sqlString, params as any[])
+    return this.db.$client.executeSync(sqlString, params as unknown[])
       .rows[0] as Awaited<ReturnType<T['get']>>;
   }
 
@@ -85,7 +85,7 @@ class DbManager implements IDbManager {
     query: T,
   ): Awaited<ReturnType<T['all']>> {
     const { sql: sqlString, params } = query.toSQL();
-    return this.db.$client.executeSync(sqlString, params as any[])
+    return this.db.$client.executeSync(sqlString, params as unknown[])
       .rows as Awaited<ReturnType<T['all']>>;
   }
 

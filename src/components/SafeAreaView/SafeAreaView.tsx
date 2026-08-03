@@ -1,5 +1,5 @@
 import React, { memo } from 'react';
-import { StyleProp, StyleSheet, View, ViewStyle } from 'react-native';
+import { StyleProp, StyleSheet, View, ViewStyle, Text } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 interface SafeAreaViewProps {
@@ -27,8 +27,14 @@ const SafeAreaView: React.FC<SafeAreaViewProps> = ({
       paddingTop: excludeTop ? 0 : top,
     },
   });
+  const onlyText = React.Children.toArray(children).every(
+    c => typeof c === 'string' || typeof c === 'number',
+  );
+
   return (
-    <View style={[styles.container, styles.padding, style]}>{children}</View>
+    <View style={[styles.container, styles.padding, style]}>
+      {onlyText ? <Text>{children}</Text> : children}
+    </View>
   );
 };
 

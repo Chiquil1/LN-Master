@@ -110,7 +110,7 @@ const VoicePickerModal: React.FC<VoicePickerModalProps> = ({
             showsHorizontalScrollIndicator={false}
             style={styles.languageChipsScroll}
           >
-            {availableLanguages.map(lang => {
+              {availableLanguages.map(lang => {
               const isSelected = selectedLanguages.includes(lang);
               const isSystemLang = lang === systemLocale;
               const showingSystemOnly = selectedLanguages.length === 0;
@@ -130,8 +130,10 @@ const VoicePickerModal: React.FC<VoicePickerModalProps> = ({
                     { color: isActive ? theme.onPrimary : theme.onSurface }
                   ]}
                 >
-                  {lang.toUpperCase()}
-                  {isSystemLang && ' (System)'}
+                    <Text style={{ color: isActive ? theme.onPrimary : theme.onSurface }}>
+                      {lang.toUpperCase()}
+                      {isSystemLang ? ' (System)' : ''}
+                    </Text>
                 </Chip>
               );
             })}

@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, StyleSheet } from 'react-native';
+import { View, StyleSheet, Text } from 'react-native';
 
 const Row = ({
   children,
@@ -7,7 +7,16 @@ const Row = ({
 }: {
   children?: React.ReactNode;
   style?: any;
-}) => <View style={[styles.row, style]}>{children}</View>;
+}) => {
+  const onlyText = React.Children.toArray(children).every(
+    c => typeof c === 'string' || typeof c === 'number',
+  );
+  return (
+    <View style={[styles.row, style]}>
+      {onlyText ? <Text>{children}</Text> : children}
+    </View>
+  );
+};
 
 export { Row };
 
