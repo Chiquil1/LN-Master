@@ -1,4 +1,4 @@
-asi lo tengo :name: Android CI
+name: Android CI
 
 on:
   push:
