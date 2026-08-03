@@ -1,4 +1,4 @@
-name: Android CI
+asi lo tengo :name: Android CI
 
 on:
   push:
@@ -53,10 +53,10 @@ jobs:
         run: pnpm format:check
 
       - name: Run database tests
-        run: pnpm test:db -- --runInBand
+        run: pnpm exec jest --selectProjects db --runInBand
 
       - name: Run React Native tests
-        run: pnpm test:rn -- --runInBand
+        run: pnpm exec jest --selectProjects rn --runInBand
 
   build-android:
     name: Build Android prerelease
