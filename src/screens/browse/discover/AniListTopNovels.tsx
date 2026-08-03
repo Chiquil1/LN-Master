@@ -150,7 +150,7 @@ const BrowseALScreen = ({ navigation }: BrowseALScreenProps) => {
     searchAniList(true);
   }, [searchAniList]);
 
-  const renderItem = useCallback< ListRenderItem<ALNovel> >(
+  const renderItem = useCallback<ListRenderItem<ALNovel>>(
     ({ item }) => (
       <DiscoverNovelCard
         novel={item}

@@ -49,10 +49,7 @@ function LibraryNovelItemComponent({
   );
 }
 
-const areEqual = (
-  prev: LibraryNovelItemProps,
-  next: LibraryNovelItemProps,
-) => {
+const areEqual = (prev: LibraryNovelItemProps, next: LibraryNovelItemProps) => {
   return (
     prev.item.id === next.item.id &&
     prev.isSelected === next.isSelected &&

@@ -72,18 +72,20 @@ const BrowseMalScreen = ({ navigation }: BrowseMalScreenProps) => {
     getNovels();
   }, [getNovels]);
 
-  const renderItem = useCallback(({ item }: { item: any }) => (
-    <DiscoverNovelCard
-      novel={item}
-      theme={theme}
-      onPress={() =>
-        navigation.navigate('GlobalSearchScreen', {
-          searchText: item.novelName,
-        })
-      }
-    />
-  ),
-  [navigation, theme]);
+  const renderItem = useCallback(
+    ({ item }: { item: any }) => (
+      <DiscoverNovelCard
+        novel={item}
+        theme={theme}
+        onPress={() =>
+          navigation.navigate('GlobalSearchScreen', {
+            searchText: item.novelName,
+          })
+        }
+      />
+    ),
+    [navigation, theme],
+  );
 
   const isCloseToBottom = ({
     layoutMeasurement,

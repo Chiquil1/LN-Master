@@ -73,7 +73,10 @@ const updateLibrary = async (
             showToast(novel.name + ': ' + error.message);
           } finally {
             completed++;
-            setMeta(meta => ({ ...meta, progress: completed / libraryNovels.length }));
+            setMeta(meta => ({
+              ...meta,
+              progress: completed / libraryNovels.length,
+            }));
           }
         }),
       );

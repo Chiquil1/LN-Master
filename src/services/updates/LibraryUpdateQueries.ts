@@ -233,7 +233,11 @@ const updateNovel = async (
         await Promise.all(
           chunk.map(async pageNum => {
             try {
-              const sourcePage = await fetchPage(pluginId, novelPath, String(pageNum));
+              const sourcePage = await fetchPage(
+                pluginId,
+                novelPath,
+                String(pageNum),
+              );
               await updateNovelChapters(
                 novel.name,
                 novelId,

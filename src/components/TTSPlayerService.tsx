@@ -25,7 +25,9 @@ const TTSPlayerService: React.FC = () => {
 
   useEffect(() => {
     if (isPlaying) {
-      BackgroundService.start(veryIntensiveTask, backgroundOptions).catch(() => {});
+      BackgroundService.start(veryIntensiveTask, backgroundOptions).catch(
+        () => {},
+      );
       updateTTSPlaybackState(true);
     } else {
       if (BackgroundService.isRunning()) {

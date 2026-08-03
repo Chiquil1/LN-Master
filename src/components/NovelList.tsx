@@ -25,7 +25,8 @@ interface NovelListProps extends FlatListProps<NovelInfo | NovelItem> {
 
 const novelListKeyExtractor = (item: NovelInfo | NovelItem, index: number) => {
   const maybeId = (item as any).id;
-  const key = maybeId != null ? String(maybeId) : (item as any).path ?? String(index);
+  const key =
+    maybeId != null ? String(maybeId) : (item as any).path ?? String(index);
   return key;
 };
 
@@ -75,11 +76,13 @@ const NovelList: React.FC<NovelListProps> = props => {
   }, [props.data, props.inSource, numColumns]);
 
   const performanceDefaults = {
-    initialNumToRender: (props.initialNumToRender as number) ?? (isListView ? 10 : 9),
+    initialNumToRender:
+      (props.initialNumToRender as number) ?? (isListView ? 10 : 9),
     windowSize: (props.windowSize as number) ?? 21,
     removeClippedSubviews: (props.removeClippedSubviews as boolean) ?? true,
     maxToRenderPerBatch: (props.maxToRenderPerBatch as number) ?? 10,
-    updateCellsBatchingPeriod: (props.updateCellsBatchingPeriod as number) ?? 50,
+    updateCellsBatchingPeriod:
+      (props.updateCellsBatchingPeriod as number) ?? 50,
   };
 
   return (

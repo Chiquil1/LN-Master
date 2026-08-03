@@ -33,10 +33,7 @@ import {
   updateTTSProgress,
   ttsMediaEmitter,
 } from '@utils/ttsNotification';
-import {
-  registerTTSWebView,
-  unregisterTTSWebView,
-} from '@utils/ttsService';
+import { registerTTSWebView, unregisterTTSWebView } from '@utils/ttsService';
 
 type WebViewPostEvent = {
   type: string;
@@ -126,7 +123,6 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
   const currentTTSIndex = currentTTSItem?.currentIndex ?? 0;
   const currentTTSSegments = currentTTSItem?.textSegments ?? [];
 
-
   useEffect(() => {
     readerSettingsRef.current = readerSettings;
   }, [readerSettings]);
@@ -166,7 +162,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
         }
       `);
     });
-    
+
     // CAMBIO CRÍTICO: El botón "Siguiente" de la notificación ahora cambia de capítulo directamente
     const nextListener = ttsMediaEmitter.addListener('TTSNext', () => {
       // Si hay un siguiente capítulo, navegamos directamente
@@ -311,23 +307,51 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
 
     // 1. Limpieza de Kaomojis y Emociones
     const kaomojiEmotions: { [key: string]: string } = {
-      '(◕ᴗ◕)': 'feliz', '(◕‿◕)': 'feliz', '(◠‿◠)': 'feliz', '(✿◠‿◠)': 'feliz',
-      '(◕‿◕✿)': 'feliz', '(≧◡≦)': 'feliz', '(^◡^)': 'feliz', '(｡◕‿◕｡)': 'feliz',
-      '(´・ω・`)': 'triste', '(╥﹏╥)': 'llorando', '(;´༎ຶ༎ຶ`)': 'llorando',
-      '(T_T)': 'llorando', '(ToT)': 'llorando', '(；ω；)': 'llorando', '(ノ_<。)': 'llorando',
-      '(╯°□°)╯︵ ┻━┻': 'enojado volcando mesa', '(╬ಠ益ಠ)': 'muy enojado',
-      '(ಠ_ಠ)': 'desaprobación', '(¬_¬)': 'desaprobación', '(ー_ー)': 'molesto',
-      '(￣へ￣)': 'enojado', '(｀Д´)': 'enojado',
-      '(⊙_⊙)': 'sorprendido', '(°ロ°)': 'sorprendido', '(O_O)': 'sorprendido',
-      '(O_O;)': 'sorprendido', '(⊙_⊙;)': 'sorprendido', '(°□°)': 'sorprendido',
-      '(*/ω＼*)': 'avergonzado', '(*/▽＼*)': 'avergonzado', '(⁄ ⁄•⁄ω⁄•⁄ ⁄)': 'avergonzado',
+      '(◕ᴗ◕)': 'feliz',
+      '(◕‿◕)': 'feliz',
+      '(◠‿◠)': 'feliz',
+      '(✿◠‿◠)': 'feliz',
+      '(◕‿◕✿)': 'feliz',
+      '(≧◡≦)': 'feliz',
+      '(^◡^)': 'feliz',
+      '(｡◕‿◕｡)': 'feliz',
+      '(´・ω・`)': 'triste',
+      '(╥﹏╥)': 'llorando',
+      '(;´༎ຶ༎ຶ`)': 'llorando',
+      '(T_T)': 'llorando',
+      '(ToT)': 'llorando',
+      '(；ω；)': 'llorando',
+      '(ノ_<。)': 'llorando',
+      '(╯°□°)╯︵ ┻━┻': 'enojado volcando mesa',
+      '(╬ಠ益ಠ)': 'muy enojado',
+      '(ಠ_ಠ)': 'desaprobación',
+      '(¬_¬)': 'desaprobación',
+      '(ー_ー)': 'molesto',
+      '(￣へ￣)': 'enojado',
+      '(｀Д´)': 'enojado',
+      '(⊙_⊙)': 'sorprendido',
+      '(°ロ°)': 'sorprendido',
+      '(O_O)': 'sorprendido',
+      '(O_O;)': 'sorprendido',
+      '(⊙_⊙;)': 'sorprendido',
+      '(°□°)': 'sorprendido',
+      '(*/ω＼*)': 'avergonzado',
+      '(*/▽＼*)': 'avergonzado',
+      '(⁄ ⁄•⁄ω⁄•⁄ ⁄)': 'avergonzado',
       '(〃▽〃)': 'avergonzado',
-      '(♥ω♥)': 'enamorado', '(♡ω♡)': 'enamorado', '(´,,•ω•,,)♡': 'cariñoso', '(∗•ω•∗)': 'cariñoso',
-      '(・_・?)': 'confundido', '(?_?)': 'confundido',
+      '(♥ω♥)': 'enamorado',
+      '(♡ω♡)': 'enamorado',
+      '(´,,•ω•,,)♡': 'cariñoso',
+      '(∗•ω•∗)': 'cariñoso',
+      '(・_・?)': 'confundido',
+      '(?_?)': 'confundido',
       '¯\\_(ツ)_/¯': 'indiferente',
-      '(ᕙᕗ)': 'fuerte', '(ง •̀_•́)ง': 'determinado',
-      '(ʕ•ᴥ•ʔ)': 'oso cute', '(=^･ω･^=)': 'gatito',
-      '(￣o￣) zzZ': 'dormido', '(～o～) zzZ': 'dormido',
+      '(ᕙᕗ)': 'fuerte',
+      '(ง •̀_•́)ง': 'determinado',
+      '(ʕ•ᴥ•ʔ)': 'oso cute',
+      '(=^･ω･^=)': 'gatito',
+      '(￣o￣) zzZ': 'dormido',
+      '(～o～) zzZ': 'dormido',
     };
 
     Object.entries(kaomojiEmotions).forEach(([kaomoji, emotion]) => {
@@ -373,7 +397,10 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
     // 4. Eliminación de símbolos decorativos y emojis
     cleaned = cleaned
       .replace(/[★☆✦✧✩✪✫✬✭✮✯✰]+/g, '')
-      .replace(/[─━│┃┄┅┆┇┈┉┊┋┌┍┎┏┐┑┒┓└┕┖┗┘┙┚┛├┝┞┟┠┡┢┣┤┥┦┧┨┩┪┫┬┭┮┯┰┱┲┳┴┵┶┷┸┹┺┻┼┽┾┿╀╁╂╃╄╅╆╇╈╉╊╋]+/g, '')
+      .replace(
+        /[─━│┃┄┅┆┇┈┉┊┋┌┍┎┏┐┑┒┓└┕┖┗┘┙┚┛├┝┞┟┠┡┢┣┤┥┦┧┨┩┪┫┬┭┮┯┰┱┲┳┴┵┶┷┸┹┺┻┼┽┾┿╀╁╂╃╄╅╆╇╈╉╊╋]+/g,
+        '',
+      )
       .replace(/[◆◇◈◉◊○◌◍◎●◐◑◒◓◔◕◖◗◘◙◚◛]+/g, '')
       .replace(/[♠♣♥♦♩♪♫♬♭♮♯]+/g, '')
       .replace(/[→←↑↓↔↕↖↗↘↙]+/g, '')
@@ -390,7 +417,14 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
         const code = ch.charCodeAt(0);
         if (code >= 0 && code <= 31) return false;
         if (code >= 127 && code <= 159) return false;
-        if (code === 0x200B || code === 0x200C || code === 0x200D || code === 0xFEFF) return false;
+        if (
+          code === 0x200b ||
+          code === 0x200c ||
+          code === 0x200d ||
+          code === 0xfeff
+        ) {
+          return false;
+        }
         return true;
       })
       .join('');
@@ -398,19 +432,19 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
 
     // 6. Reemplazo de abreviaturas comunes
     const customReplacements: { [key: string]: string } = {
-      'TL': 'Traducción', 
-      'JP': 'Japonés', 
-      'CN': 'Chino', 
+      'TL': 'Traducción',
+      'JP': 'Japonés',
+      'CN': 'Chino',
       'KR': 'Coreano',
-      'T/N': 'Nota del traductor', 
-      'N/T': 'Nota del traductor', 
+      'T/N': 'Nota del traductor',
+      'N/T': 'Nota del traductor',
       'A/N': 'Nota del autor',
-      'N/A': 'Nota del autor', 
-      'ED': 'Edición', 
-      'PR': 'Prólogo', 
+      'N/A': 'Nota del autor',
+      'ED': 'Edición',
+      'PR': 'Prólogo',
       'EP': 'Epílogo',
     };
-    
+
     Object.entries(customReplacements).forEach(([key, value]) => {
       const regex = new RegExp(`\\b${key}\\b`, 'gi');
       cleaned = cleaned.replace(regex, value);
@@ -448,10 +482,15 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
     if (!processedText || processedText.length < 2) {
       const handleEmptyText = () => {
         isSpeakingRef.current = false;
-        const isBackground = appStateRef.current === 'background' || appStateRef.current === 'inactive';
-        
+        const isBackground =
+          appStateRef.current === 'background' ||
+          appStateRef.current === 'inactive';
+
         // Verificar si hay más texto en la cola actual
-        if (currentTTSSegments.length > 0 && currentTTSIndex + 1 < currentTTSSegments.length) {
+        if (
+          currentTTSSegments.length > 0 &&
+          currentTTSIndex + 1 < currentTTSSegments.length
+        ) {
           const nextIndex = currentTTSIndex + 1;
           const nextText = currentTTSSegments[nextIndex];
           if (nextText) {
@@ -480,7 +519,9 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
         }
 
         if (isBackground) {
-          console.log('[TTS] Capítulo terminado y app en background, deteniendo reproducción');
+          console.log(
+            '[TTS] Capítulo terminado y app en background, deteniendo reproducción',
+          );
           isTTSReadingRef.current = false;
           setTTSIsPlaying(false);
           webViewRef.current?.injectJavaScript('tts.stop?.()');
@@ -499,16 +540,21 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
     Speech.speak(processedText, {
       onDone() {
         isSpeakingRef.current = false;
-        const isBackground = appStateRef.current === 'background' || appStateRef.current === 'inactive';
+        const isBackground =
+          appStateRef.current === 'background' ||
+          appStateRef.current === 'inactive';
         const currentIndex = currentTTSIndex;
 
-        if (currentTTSSegments.length > 0 && currentIndex + 1 < currentTTSSegments.length) {
+        if (
+          currentTTSSegments.length > 0 &&
+          currentIndex + 1 < currentTTSSegments.length
+        ) {
           const nextIndex = currentIndex + 1;
           const nextText = currentTTSSegments[nextIndex];
 
           if (nextText) {
             updateCurrentItemCurrentIndex(nextIndex);
-            
+
             webViewRef.current?.injectJavaScript(`
               (function() {
                 if(window.tts && window.tts.allReadableElements) {
@@ -526,7 +572,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
               })();
               true;
             `);
-            
+
             speakText(nextText);
             return;
           }
@@ -541,7 +587,9 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
         }
 
         if (isBackground) {
-          console.log('[TTS] Capítulo terminado y app en background, deteniendo reproducción');
+          console.log(
+            '[TTS] Capítulo terminado y app en background, deteniendo reproducción',
+          );
           isTTSReadingRef.current = false;
           setTTSIsPlaying(false);
           updateTTSPlaybackState(false);
@@ -553,16 +601,19 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       onError(e) {
         console.warn('TTS Error:', e);
         isSpeakingRef.current = false;
-        
+
         const currentIndex = currentTTSIndex;
-        if (currentTTSSegments.length > 0 && currentIndex + 1 < currentTTSSegments.length) {
-           const nextIndex = currentIndex + 1;
-           const nextText = currentTTSSegments[nextIndex];
-           if(nextText) {
-             updateCurrentItemCurrentIndex(nextIndex);
-             speakText(nextText);
-             return;
-           }
+        if (
+          currentTTSSegments.length > 0 &&
+          currentIndex + 1 < currentTTSSegments.length
+        ) {
+          const nextIndex = currentIndex + 1;
+          const nextText = currentTTSSegments[nextIndex];
+          if (nextText) {
+            updateCurrentItemCurrentIndex(nextIndex);
+            speakText(nextText);
+            return;
+          }
         }
         webViewRef.current?.injectJavaScript('tts.next?.()');
       },
@@ -610,14 +661,14 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       onLoadEnd={() => {
         // Resetear bandera de transición al cargar nuevo capítulo
         isTransitioningRef.current = false;
-        
+
         const currentBatteryLevel = getBatteryLevelSync();
         webViewRef.current?.injectJavaScript(
           `if (window.reader && window.reader.batteryLevel) {
             window.reader.batteryLevel.val = ${currentBatteryLevel};
           }`,
         );
-        
+
         webViewRef.current?.injectJavaScript(cleanupScript);
 
         if (autoStartTTSRef.current) {
@@ -795,8 +846,8 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
                 --theme-onSecondary: ${theme.onSecondary};
                 --theme-surface: ${theme.surface};
                 --theme-surface-0-9: ${color(theme.surface)
-            .alpha(0.9)
-            .toString()};
+                  .alpha(0.9)
+                  .toString()};
                 --theme-onSurface: ${theme.onSurface};
                 --theme-surfaceVariant: ${theme.surfaceVariant};
                 --theme-onSurfaceVariant: ${theme.onSurfaceVariant};
@@ -806,20 +857,23 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
                 
                 @font-face {
                   font-family: ${readerSettings.fontFamily};
-                  src: url("file:///android_asset/fonts/${readerSettings.fontFamily
-          }.ttf");
+                  src: url("file:///android_asset/fonts/${
+                    readerSettings.fontFamily
+                  }.ttf");
                 }
                 </style>
  
               <link rel="stylesheet" href="${pluginCustomCSS}">
               <style>${readerSettings.customJS}</style>
             </head>
-            <body class="${chapterGeneralSettings.pageReader ? 'page-reader' : ''
-          }">
-              <div class="transition-chapter" style="transform: ${nextChapterScreenVisible.current
-            ? 'translateX(-100%)'
-            : 'translateX(0%)'
-          };
+            <body class="${
+              chapterGeneralSettings.pageReader ? 'page-reader' : ''
+            }">
+              <div class="transition-chapter" style="transform: ${
+                nextChapterScreenVisible.current
+                  ? 'translateX(-100%)'
+                  : 'translateX(0%)'
+              };
               ${chapterGeneralSettings.pageReader ? '' : 'display: none'}"
               ">${chapter.name}</div>
               <div id="LNReader-chapter">
@@ -829,27 +883,30 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
               </body>
               <script>
                 var initialPageReaderConfig = ${JSON.stringify({
-            nextChapterScreenVisible: nextChapterScreenVisible.current,
-          })};
+                  nextChapterScreenVisible: nextChapterScreenVisible.current,
+                })};
  
                 var initialReaderConfig = ${JSON.stringify({
-            readerSettings,
-            chapterGeneralSettings,
-            novel,
-            chapter,
-            nextChapter,
-            prevChapter,
-            batteryLevel,
-            autoSaveInterval: 2222,
-            DEBUG: __DEV__,
-            strings: {
-              finished: getString('readerScreen.finished') + ': ' + chapter.name.trim(),
-              nextChapter: getString('readerScreen.nextChapter', {
-                name: nextChapter?.name,
-              }),
-              noNextChapter: getString('readerScreen.noNextChapter'),
-            },
-          })}
+                  readerSettings,
+                  chapterGeneralSettings,
+                  novel,
+                  chapter,
+                  nextChapter,
+                  prevChapter,
+                  batteryLevel,
+                  autoSaveInterval: 2222,
+                  DEBUG: __DEV__,
+                  strings: {
+                    finished:
+                      getString('readerScreen.finished') +
+                      ': ' +
+                      chapter.name.trim(),
+                    nextChapter: getString('readerScreen.nextChapter', {
+                      name: nextChapter?.name,
+                    }),
+                    noNextChapter: getString('readerScreen.noNextChapter'),
+                  },
+                })}
               </script>
               <script src="${assetsUriPrefix}/js/polyfill-onscrollend.js"></script>
               <script src="${assetsUriPrefix}/js/icons.js"></script>
