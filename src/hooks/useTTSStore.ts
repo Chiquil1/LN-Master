@@ -98,7 +98,18 @@ export const useTTSStore = create<TTSState>()(
       storage: createJSONStorage(() => ({
         getItem: (name: string) => MMKVStorage.getString(name) ?? null,
         setItem: (name: string, value: string) => MMKVStorage.set(name, value),
-        removeItem: (name: string) => (MMKVStorage as any).delete(name),
+        removeItem: (name: string) => {
+          // Use typed helper to avoid `any` cast spread across the codebase
+          try {
+            // lazy import to avoid circular imports
+            // eslint-disable-next-line @typescript-eslint/no-var-requires
+            const { deleteMMKVKey } = require('@utils/mmkv/mmkv');
+            deleteMMKVKey(name);
+          } catch {
+            // fallback to best-effort delete
+            (MMKVStorage as unknown as { delete?: (k: string) => void }).delete?.(name);
+          }
+        },
       })),
       partialize: state => ({
         queue: state.queue,

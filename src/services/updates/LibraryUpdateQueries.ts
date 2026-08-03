@@ -9,6 +9,7 @@ import { novelSchema, chapterSchema } from '@database/schema';
 import { eq, and, inArray } from 'drizzle-orm';
 import NativeFile from '@specs/NativeFile';
 import { insertChapters } from '@database/queries/ChapterQueries';
+import { sleep } from '@utils/sleep';
 
 /**
  * Update novel metadata in the database including cover image.
@@ -218,18 +219,34 @@ const updateNovel = async (
         } catch {}
       }
 
-      // Fetch any new pages that were added
-      for (let page = oldTotalPages + 1; page <= novel.totalPages; page++) {
-        try {
-          const sourcePage = await fetchPage(pluginId, novelPath, String(page));
-          await updateNovelChapters(
-            novel.name,
-            novelId,
-            sourcePage.chapters || [],
-            downloadNewChapters,
-            String(page),
-          );
-        } catch {}
+      // Fetch any new pages that were added — run with limited concurrency
+      const CONCURRENCY = 3;
+      const pages: number[] = [];
+      for (let p = oldTotalPages + 1; p <= novel.totalPages; p++) pages.push(p);
+
+      const chunks: number[][] = [];
+      for (let i = 0; i < pages.length; i += CONCURRENCY) {
+        chunks.push(pages.slice(i, i + CONCURRENCY));
+      }
+
+      for (const chunk of chunks) {
+        await Promise.all(
+          chunk.map(async pageNum => {
+            try {
+              const sourcePage = await fetchPage(pluginId, novelPath, String(pageNum));
+              await updateNovelChapters(
+                novel.name,
+                novelId,
+                sourcePage.chapters || [],
+                downloadNewChapters,
+                String(pageNum),
+              );
+            } catch (e) {
+              // ignore page-level failures
+            }
+          }),
+        );
+        await sleep(150);
       }
     }
   }

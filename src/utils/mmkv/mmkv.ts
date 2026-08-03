@@ -15,3 +15,10 @@ export function getMMKVObject<T = unknown>(key: string): T | undefined {
 export function setMMKVObject<T = unknown>(key: string, obj: T): void {
   MMKVStorage.set(key, JSON.stringify(obj));
 }
+
+export function deleteMMKVKey(key: string): void {
+  const maybeDelete = (MMKVStorage as unknown as { delete?: (k: string) => void }).delete;
+  if (typeof maybeDelete === 'function') {
+    maybeDelete.call(MMKVStorage, key);
+  }
+}

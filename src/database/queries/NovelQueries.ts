@@ -199,7 +199,9 @@ export const switchNovelToLibraryQuery = async (
 /**
  * Removes multiple novels from the library and clears their categories.
  */
-export const removeNovelsFromLibrary = async (novelIds: Array<number>) => {
+export const removeNovelsFromLibrary = async (
+  novelIds: Array<number>,
+): Promise<void> => {
   if (!novelIds.length) return;
 
   await dbManager.write(async tx => {
@@ -225,7 +227,7 @@ export const getCachedNovels = async (): Promise<NovelInfo[]> => {
     .all();
 };
 
-export const deleteCachedNovels = async () => {
+export const deleteCachedNovels = async (): Promise<void> => {
   await dbManager.write(async tx => {
     await tx.delete(novelSchema).where(eq(novelSchema.inLibrary, false)).run();
   });
@@ -235,7 +237,7 @@ export const deleteCachedNovels = async () => {
 /**
  * Restore a novel from backup using Drizzle ORM.
  */
-export const restoreLibrary = async (novel: NovelInfo) => {
+export const restoreLibrary = async (novel: NovelInfo): Promise<void> => {
   const sourceNovel = await fetchNovel(novel.pluginId, novel.path).catch(e => {
     throw e;
   });
@@ -299,7 +301,7 @@ export const restoreLibrary = async (novel: NovelInfo) => {
   }
 };
 
-export const updateNovelInfo = async (info: NovelInfo) => {
+export const updateNovelInfo = async (info: NovelInfo): Promise<void> => {
   await dbManager.write(async tx => {
     await tx
       .update(novelSchema)
@@ -322,7 +324,9 @@ export const updateNovelInfo = async (info: NovelInfo) => {
 /**
  * Handles picking and saving a custom novel cover.
  */
-export const pickCustomNovelCover = async (novel: NovelInfo) => {
+export const pickCustomNovelCover = async (
+  novel: NovelInfo,
+): Promise<string | undefined> => {
   const image = await DocumentPicker.getDocumentAsync({ type: 'image/*' });
   if (image.assets && image.assets[0]) {
     const novelDir = NOVEL_STORAGE + '/' + novel.pluginId + '/' + novel.id;
@@ -346,7 +350,7 @@ export const pickCustomNovelCover = async (novel: NovelInfo) => {
 export const updateNovelCategoryById = async (
   novelId: number,
   categoryIds: number[],
-) => {
+): Promise<void> => {
   if (!categoryIds.length) return;
 
   await dbManager.write(async tx => {
@@ -425,7 +429,9 @@ export const updateNovelCategories = async (
 /**
  * Restores novel and chapters from a backup object.
  */
-export const _restoreNovelAndChapters = async (backupNovel: BackupNovel) => {
+export const _restoreNovelAndChapters = async (
+  backupNovel: BackupNovel,
+): Promise<void> => {
   const { chapters, ...novel } = backupNovel;
   await dbManager.write(async tx => {
     // Delete existing novel data

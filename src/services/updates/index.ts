@@ -55,25 +55,30 @@ const updateLibrary = async (
 
   if (libraryNovels.length > 0) {
     MMKVStorage.set(LAST_UPDATE_TIME, dayjs().format('YYYY-MM-DD HH:mm:ss'));
-    for (let i = 0; i < libraryNovels.length; i++) {
-      setMeta(meta => ({
-        ...meta,
-        progressText: libraryNovels[i].name,
-        progress: i / libraryNovels.length,
-      }));
+    // Process updates with controlled concurrency to avoid N+1 slowness
+    const CONCURRENCY = 4;
+    let completed = 0;
+    const chunks: DBNovelInfo[][] = [];
+    for (let i = 0; i < libraryNovels.length; i += CONCURRENCY) {
+      chunks.push(libraryNovels.slice(i, i + CONCURRENCY));
+    }
 
-      try {
-        await updateNovel(
-          libraryNovels[i].pluginId,
-          libraryNovels[i].path,
-          libraryNovels[i].id,
-          options,
-        );
-        await sleep(1000);
-      } catch (error: any) {
-        showToast(libraryNovels[i].name + ': ' + error.message);
-        continue;
-      }
+    for (const chunk of chunks) {
+      await Promise.all(
+        chunk.map(async novel => {
+          setMeta(meta => ({ ...meta, progressText: novel.name }));
+          try {
+            await updateNovel(novel.pluginId, novel.path, novel.id, options);
+          } catch (error: any) {
+            showToast(novel.name + ': ' + error.message);
+          } finally {
+            completed++;
+            setMeta(meta => ({ ...meta, progress: completed / libraryNovels.length }));
+          }
+        }),
+      );
+      // brief pause between batches to be gentle on remote sources
+      await sleep(200);
     }
   } else {
     showToast("There's no novel to be updated");
