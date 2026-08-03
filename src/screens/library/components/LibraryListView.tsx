@@ -23,7 +23,7 @@ interface Props {
   pickAndImport: () => void;
 }
 
-export const LibraryView: React.FC<Props> = ({
+const LibraryViewComponent: React.FC<Props> = ({
   categoryId,
   categoryName,
   pickAndImport,
@@ -135,6 +135,7 @@ export const LibraryView: React.FC<Props> = ({
   );
 };
 
+export const LibraryView = React.memo(LibraryViewComponent) as typeof LibraryViewComponent;
 const styles = StyleSheet.create({
   flex: { flex: 1 },
 });

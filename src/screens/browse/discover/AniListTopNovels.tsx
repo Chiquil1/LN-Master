@@ -150,16 +150,19 @@ const BrowseALScreen = ({ navigation }: BrowseALScreenProps) => {
     searchAniList(true);
   }, [searchAniList]);
 
-  const renderItem: ListRenderItem<ALNovel> = ({ item }) => (
-    <DiscoverNovelCard
-      novel={item}
-      theme={theme}
-      onPress={() =>
-        navigation.navigate('GlobalSearchScreen', {
-          searchText: item.novelName,
-        })
-      }
-    />
+  const renderItem = useCallback< ListRenderItem<ALNovel> >(
+    ({ item }) => (
+      <DiscoverNovelCard
+        novel={item}
+        theme={theme}
+        onPress={() =>
+          navigation.navigate('GlobalSearchScreen', {
+            searchText: item.novelName,
+          })
+        }
+      />
+    ),
+    [navigation, theme],
   );
 
   const ListEmptyComponent = useCallback(

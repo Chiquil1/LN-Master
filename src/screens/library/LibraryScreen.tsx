@@ -152,10 +152,13 @@ const LibraryScreen = ({ navigation }: LibraryScreenProps) => {
     [navigation],
   );
 
-  const searchbarPlaceholder =
-    selectedNovelIds.length === 0
-      ? getString('libraryScreen.searchbar')
-      : `${selectedNovelIds.length} selected`;
+  const searchbarPlaceholder = useMemo(
+    () =>
+      selectedNovelIds.length === 0
+        ? getString('libraryScreen.searchbar')
+        : `${selectedNovelIds.length} selected`,
+    [selectedNovelIds.length],
+  );
 
   const openRandom = useCallback(() => {
     const randomNovel =

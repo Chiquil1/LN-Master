@@ -32,7 +32,7 @@ const ReaderSheetPreferenceItem: React.FC<ReaderSheetPreferenceItemProps> = ({
   );
 };
 
-export default ReaderSheetPreferenceItem;
+export default React.memo(ReaderSheetPreferenceItem);
 
 const styles = StyleSheet.create({
   container: {

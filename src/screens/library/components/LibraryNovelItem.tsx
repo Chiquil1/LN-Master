@@ -14,7 +14,7 @@ interface LibraryNovelItemProps {
   imageRequestInit: ImageRequestInit | undefined;
 }
 
-const LibraryNovelItem = memo(function LibraryNovelItem({
+function LibraryNovelItemComponent({
   item,
   theme,
   isSelected,
@@ -47,6 +47,19 @@ const LibraryNovelItem = memo(function LibraryNovelItem({
       imageRequestInit={imageRequestInit}
     />
   );
-});
+}
 
-export default LibraryNovelItem;
+const areEqual = (
+  prev: LibraryNovelItemProps,
+  next: LibraryNovelItemProps,
+) => {
+  return (
+    prev.item.id === next.item.id &&
+    prev.isSelected === next.isSelected &&
+    prev.hasSelection === next.hasSelection &&
+    prev.theme === next.theme &&
+    prev.imageRequestInit === next.imageRequestInit
+  );
+};
+
+export default memo(LibraryNovelItemComponent, areEqual);

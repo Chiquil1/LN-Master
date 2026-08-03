@@ -56,7 +56,7 @@ const DiscoverNovelCard: React.FC<Props> = ({ novel, onPress, theme }) => {
   );
 };
 
-export default DiscoverNovelCard;
+export default React.memo(DiscoverNovelCard);
 
 const styles = StyleSheet.create({
   container: {

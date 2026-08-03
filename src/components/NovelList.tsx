@@ -23,8 +23,11 @@ interface NovelListProps extends FlatListProps<NovelInfo | NovelItem> {
   data: Array<listDataItem>;
 }
 
-const novelListKeyExtractor = (item: NovelInfo | NovelItem, index: number) =>
-  index + '_' + item.path;
+const novelListKeyExtractor = (item: NovelInfo | NovelItem, index: number) => {
+  const maybeId = (item as any).id;
+  const key = maybeId != null ? String(maybeId) : (item as any).path ?? String(index);
+  return key;
+};
 
 const NovelList: React.FC<NovelListProps> = props => {
   const { displayMode = DisplayModes.Comfortable, novelsPerRow = 3 } =
@@ -45,16 +48,18 @@ const NovelList: React.FC<NovelListProps> = props => {
     }
   }, [isListView, orientation, novelsPerRow]);
 
-  let extendedNovelList: Array<listDataItem> = props?.data;
-  if (props.data?.length && props.inSource) {
-    const remainder = numColumns - (props.data?.length % numColumns);
+  const extendedNovelList: Array<listDataItem> = useMemo(() => {
+    if (!props.data) return [] as Array<listDataItem>;
+    if (!props.inSource || !props.data.length) return props.data;
+
+    const remainder = numColumns - (props.data.length % numColumns);
     const extension: Array<listDataItem> = [];
     if (remainder !== 0 && remainder !== numColumns) {
       for (let i = 0; i < remainder; i++) {
         extension.push({
           cover: '',
           name: '',
-          path: 'loading-' + remainder,
+          path: 'loading-' + remainder + '-' + i,
           completeRow: 1,
         } as listDataItem);
       }
@@ -62,12 +67,20 @@ const NovelList: React.FC<NovelListProps> = props => {
     extension.push({
       cover: '',
       name: '',
-      path: 'loading-' + remainder,
+      path: 'loading-' + remainder + '-end',
       completeRow: 2,
     } as listDataItem);
 
-    extendedNovelList = [...props.data, ...extension];
-  }
+    return [...props.data, ...extension];
+  }, [props.data, props.inSource, numColumns]);
+
+  const performanceDefaults = {
+    initialNumToRender: (props.initialNumToRender as number) ?? (isListView ? 10 : 9),
+    windowSize: (props.windowSize as number) ?? 21,
+    removeClippedSubviews: (props.removeClippedSubviews as boolean) ?? true,
+    maxToRenderPerBatch: (props.maxToRenderPerBatch as number) ?? 10,
+    updateCellsBatchingPeriod: (props.updateCellsBatchingPeriod as number) ?? 50,
+  };
 
   return (
     <FlatList
@@ -78,13 +91,14 @@ const NovelList: React.FC<NovelListProps> = props => {
       numColumns={numColumns}
       key={numColumns}
       keyExtractor={novelListKeyExtractor}
+      {...performanceDefaults}
       {...props}
       data={extendedNovelList}
     />
   );
 };
 
-export default NovelList;
+export default React.memo(NovelList);
 
 const styles = StyleSheet.create({
   flatListCont: {

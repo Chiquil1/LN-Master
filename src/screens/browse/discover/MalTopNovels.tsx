@@ -5,7 +5,6 @@ import {
   ActivityIndicator,
   FlatList,
   NativeScrollEvent,
-  FlatListProps,
 } from 'react-native';
 
 import * as WebBrowser from 'expo-web-browser';
@@ -73,7 +72,7 @@ const BrowseMalScreen = ({ navigation }: BrowseMalScreenProps) => {
     getNovels();
   }, [getNovels]);
 
-  const renderItem: FlatListProps<any>['renderItem'] = ({ item }) => (
+  const renderItem = useCallback(({ item }: { item: any }) => (
     <DiscoverNovelCard
       novel={item}
       theme={theme}
@@ -83,7 +82,8 @@ const BrowseMalScreen = ({ navigation }: BrowseMalScreenProps) => {
         })
       }
     />
-  );
+  ),
+  [navigation, theme]);
 
   const isCloseToBottom = ({
     layoutMeasurement,
