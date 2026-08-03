@@ -51,27 +51,52 @@ class NativeTTSMediaControl(private val appContext: ReactApplicationContext) :
             when (intent.action) {
                 ACTION_PLAY -> {
                     isPlaying = true
-                    sendEvent("TTSPlay")
+                    // Actualizar UI primero para evitar lag visual
                     updateNotification()
+                    sendEvent("TTSPlay")
                 }
                 ACTION_PAUSE -> {
                     isPlaying = false
-                    sendEvent("TTSPause")
                     updateNotification()
+                    sendEvent("TTSPause")
                 }
-                ACTION_STOP -> sendEvent("TTSStop")
-                ACTION_PREV -> sendEvent("TTSPrev")
-                ACTION_NEXT -> sendEvent("TTSNext")
-                ACTION_REWIND -> sendEvent("TTSRewind")
+                ACTION_STOP -> {
+                    // No cambiamos isPlaying aquí para permitir reinicio rápido si se desea
+                    sendEvent("TTSStop")
+                    // Opcional: actualizar notificación a estado detenido
+                    updateNotification() 
+                }
+                ACTION_PREV -> {
+                    // Forzar actualización visual inmediata antes de navegar
+                    isPlaying = false 
+                    updateNotification()
+                    sendEvent("TTSPrev")
+                }
+                ACTION_NEXT -> {
+                    // CRÍTICO: Forzar estado pausa visualmente antes de cambiar de capítulo
+                    // Esto evita que Android espere a que termine el audio actual
+                    isPlaying = false
+                    updateNotification()
+                    sendEvent("TTSNext")
+                }
+                ACTION_REWIND -> {
+                    updateNotification()
+                    sendEvent("TTSRewind")
+                }
             }
         }
     }
 
     private fun sendEvent(eventName: String) {
         if (listenerCount > 0) {
-            appContext.getJSModule(
-                DeviceEventManagerModule.RCTDeviceEventEmitter::class.java
-            ).emit(eventName, null)
+            try {
+                appContext.getJSModule(
+                    DeviceEventManagerModule.RCTDeviceEventEmitter::class.java
+                ).emit(eventName, null)
+            } catch (e: Exception) {
+                // Ignorar errores si JS no está listo (ej. app en background profundo)
+                // El evento se perderá pero la app no crasheará
+            }
         }
     }
 
@@ -80,9 +105,13 @@ class NativeTTSMediaControl(private val appContext: ReactApplicationContext) :
             val params = com.facebook.react.bridge.Arguments.createMap().apply {
                 putInt("position", elementIndex.toInt())
             }
-            appContext.getJSModule(
-                DeviceEventManagerModule.RCTDeviceEventEmitter::class.java
-            ).emit("TTSSeekTo", params)
+            try {
+                appContext.getJSModule(
+                    DeviceEventManagerModule.RCTDeviceEventEmitter::class.java
+                ).emit("TTSSeekTo", params)
+            } catch (e: Exception) {
+                // Ignorar
+            }
         }
     }
 
@@ -122,10 +151,14 @@ class NativeTTSMediaControl(private val appContext: ReactApplicationContext) :
                     }
 
                     override fun onSkipToPrevious() {
+                        isPlaying = false
+                        updateNotification()
                         sendEvent("TTSPrev")
                     }
 
                     override fun onSkipToNext() {
+                        isPlaying = false
+                        updateNotification()
                         sendEvent("TTSNext")
                     }
 
@@ -212,13 +245,13 @@ class NativeTTSMediaControl(private val appContext: ReactApplicationContext) :
         val playPauseAction = if (isPlaying) {
             NotificationCompat.Action.Builder(
                 android.R.drawable.ic_media_pause,
-                "Pause",
+                "Pausar",
                 buildPendingIntent(ACTION_PAUSE)
             ).build()
         } else {
             NotificationCompat.Action.Builder(
                 android.R.drawable.ic_media_play,
-                "Play",
+                "Reproducir",
                 buildPendingIntent(ACTION_PLAY)
             ).build()
         }
@@ -241,9 +274,7 @@ class NativeTTSMediaControl(private val appContext: ReactApplicationContext) :
             buildPendingIntent(ACTION_NEXT)
         ).build()
 
-        // AQUÍ ESTÁ LA CLAVE: 
-        // setOngoing(true) fuerza a que la notificación NO se pueda deslizar para cerrar
-        // y permanezca visible aunque isPlaying sea false (cuando termina el capítulo).
+        // CLAVE: Notificación persistente que no se elimina
         val notification = NotificationCompat.Builder(appContext, CHANNEL_ID)
             .setContentTitle(currentSubtitle)
             .setContentText(currentTitle)
@@ -252,8 +283,8 @@ class NativeTTSMediaControl(private val appContext: ReactApplicationContext) :
             .setContentIntent(getContentIntent())
             .setDeleteIntent(buildPendingIntent(ACTION_STOP))
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setOngoing(true)            // <--- CAMBIO CRÍTICO: Siempre true
-            .setAutoCancel(false)         // <--- CAMBIO CRÍTICO: No auto eliminar
+            .setOngoing(true)            // Mantiene la notificación viva siempre
+            .setAutoCancel(false)         // Evita que se cierre al tocar fuera
             .addAction(prevAction)
             .addAction(rewindAction)
             .addAction(playPauseAction)

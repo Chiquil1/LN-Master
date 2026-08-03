@@ -167,13 +167,24 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
         }
       `);
     });
+    
+    // CAMBIO CRÍTICO: El botón "Siguiente" de la notificación ahora cambia de capítulo directamente
     const nextListener = ttsMediaEmitter.addListener('TTSNext', () => {
-      webViewRef.current?.injectJavaScript(`
-        if (window.tts && window.reader && window.reader.nextChapter) {
-          window.reader.post({ type: 'next', autoStartTTS: true });
-        }
-      `);
+      // Si hay un siguiente capítulo, navegamos directamente
+      if (nextChapter) {
+        isTransitioningRef.current = true;
+        autoStartTTSRef.current = true;
+        setTimeout(() => {
+          navigateChapter('NEXT');
+        }, 100);
+      } else {
+        // Si no hay siguiente capítulo, solo paramos o notificamos fin
+        webViewRef.current?.injectJavaScript(`
+          if (window.tts) { tts.stop(); }
+        `);
+      }
     });
+
     const seekToListener = ttsMediaEmitter.addListener(
       'TTSSeekTo',
       (event: { position: number }) => {
@@ -192,7 +203,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       nextListener.remove();
       seekToListener.remove();
     };
-  }, [webViewRef]);
+  }, [webViewRef, nextChapter, navigateChapter]);
 
   useEffect(() => {
     if (isTTSReadingRef.current) {
