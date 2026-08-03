@@ -221,7 +221,7 @@ const TTSTab: React.FC = () => {
       >
         <View style={styles.section}>
           <List.SubHeader theme={theme}>
-            <Text style={{ color: theme.onSurface }}>{'Text to Speech'}</Text>
+            <Text style={{ color: theme.onSurface }}>Text to Speech</Text>
           </List.SubHeader>
 
           <ReaderSheetPreferenceItem

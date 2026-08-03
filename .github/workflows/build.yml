@@ -1,66 +1,108 @@
-name: Build
+name: Android CI
 
 on:
   push:
     branches:
-      - master
+      - main
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: android-ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  quality:
+    name: Quality checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.27.0
+          cache: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate test environment
+        run: pnpm generate:env:debug
+
+      - name: Check TypeScript
+        run: pnpm type-check
+
+      - name: Check ESLint
+        run: pnpm lint
+
+      - name: Check formatting
+        run: pnpm format:check
+
+      - name: Run database tests
+        run: pnpm test:db -- --runInBand
+
+      - name: Run React Native tests
+        run: pnpm test:rn -- --runInBand
+
   build-android:
-    name: Build App
+    name: Build Android prerelease
+    needs: quality
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
+    permissions:
+      contents: write
+
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-
-      - name: Get pnpm Store Directory
-        shell: bash
-        run: |
-          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
-
-      - name: Setup pnpm Cache
-        uses: actions/cache@v4
+        uses: pnpm/action-setup@v6
         with:
-          path: ${{ env.STORE_PATH }}
-          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-pnpm-store-
+          version: 10.27.0
+          cache: true
 
-      - name: Install Dependencies
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Generate Environment Variables
-        run: |
-          pnpm generate:env:release \
-            --build-type "Github Action" \
-            --node-env "production" \
-            --myanimelist-client-id "${{ vars.MYANIMELIST_CLIENT_ID }}" \
-            --anilist-client-id "${{ vars.ANILIST_CLIENT_ID }}"
+      - name: Generate release environment
+        run: >
+          pnpm generate:env:release
+          --
+          --myanimelist-client-id "${{ vars.MYANIMELIST_CLIENT_ID }}"
+          --anilist-client-id "${{ vars.ANILIST_CLIENT_ID }}"
 
-      - name: Build Android Release with Rock
+      - name: Build Android prerelease
         uses: callstackincubator/android@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO_OWNER: ${{ github.repository_owner }}
           REPO_NAME: ${{ github.event.repository.name }}
         with:
-          re-sign: true
           github-token: ${{ secrets.GITHUB_TOKEN }}
           variant: preRelease
+          re-sign: true
+          validate-elf-alignment: true
