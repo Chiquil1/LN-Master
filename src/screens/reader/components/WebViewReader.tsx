@@ -115,6 +115,8 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
   const ttsQueueRef = useRef<string[]>([]);
   const ttsQueueIndexRef = useRef<number>(0);
   const isSpeakingRef = useRef<boolean>(false);
+  // Ref para evitar múltiples disparos de cambio de capítulo
+  const isTransitioningRef = useRef<boolean>(false);
 
   const veryIntensiveTask = async () => {
     await new Promise(() => {});
@@ -205,7 +207,9 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
 
   useEffect(() => {
     return () => {
-      dismissTTSNotification();
+      if (!isTTSReadingRef.current) {
+        updateTTSPlaybackState(false);
+      }
       if (BackgroundService) {
         BackgroundService.stop().catch(() => {});
       }
@@ -379,7 +383,6 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       .replace(/[\u2028\u2029]/g, ' ');
 
     // 6. Reemplazo de abreviaturas comunes
-    // CORRECCIÓN CRÍTICA: Se eliminó 'EN': 'Inglés' para evitar que diga esa palabra.
     const customReplacements: { [key: string]: string } = {
       'TL': 'Traducción', 
       'JP': 'Japonés', 
@@ -392,7 +395,6 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       'ED': 'Edición', 
       'PR': 'Prólogo', 
       'EP': 'Epílogo',
-      // 'EN' se deja intacto o se puede poner '' si quieres borrarlo, pero NO convertirlo a 'Inglés'
     };
     
     Object.entries(customReplacements).forEach(([key, value]) => {
@@ -402,10 +404,10 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
 
     // 7. Normalización final de espacios y puntuación
     cleaned = cleaned
-      .replace(/\s+/g, ' ') // Múltiples espacios a uno
-      .replace(/\s+([.,!?;:])/g, '$1') // Espacio antes de puntuación
-      .replace(/([.,!?;:])\s*([.,!?;:])/g, '$1') // Puntuación duplicada
-      .replace(/^\s+|\s+$/g, '') // Trim inicial/final
+      .replace(/\s+/g, ' ')
+      .replace(/\s+([.,!?;:])/g, '$1')
+      .replace(/([.,!?;:])\s*([.,!?;:])/g, '$1')
+      .replace(/^\s+|\s+$/g, '')
       .trim();
 
     if (cleaned.length < 2) return '';
@@ -413,7 +415,6 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
   };
 
   const speakText = (text: string) => {
-    // Prevención de superposición
     if (isSpeakingRef.current) {
       Speech.stop();
     }
@@ -421,7 +422,6 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
 
     let processedText = cleanTextForTTS(text);
 
-    // Limpieza agresiva final específica para caracteres de escape
     processedText = processedText
       .replace(/\\/g, '')
       .replace(/""/g, '"')
@@ -435,6 +435,8 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       const handleEmptyText = () => {
         isSpeakingRef.current = false;
         const isBackground = appStateRef.current === 'background' || appStateRef.current === 'inactive';
+        
+        // Verificar si hay más texto en la cola actual
         if (ttsQueueRef.current.length > 0 && ttsQueueIndexRef.current + 1 < ttsQueueRef.current.length) {
           const nextIndex = ttsQueueIndexRef.current + 1;
           const nextText = ttsQueueRef.current[nextIndex];
@@ -454,29 +456,38 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
             return;
           }
         }
-        if (ttsQueueRef.current.length > 0 && nextChapter) {
-          autoStartTTSRef.current = true;
-          navigateChapter('NEXT');
+
+        // CAMBIO PRINCIPAL: Automatización de cambio de capítulo
+        // Si la cola terminó Y hay un siguiente capítulo Y no estamos ya transitando
+        if (nextChapter && !isTransitioningRef.current) {
+          isTransitioningRef.current = true; // Bloquear múltiples llamadas
+          autoStartTTSRef.current = true;    // Activar auto-reproducción en el nuevo capítulo
+          
+          // Pequeña pausa para asegurar que la UI se actualice
+          setTimeout(() => {
+            navigateChapter('NEXT');
+          }, 200);
           return;
         }
+
+        // Si no hay siguiente capítulo y está en segundo plano, solo pausar (no eliminar notificación)
         if (isBackground) {
           isTTSReadingRef.current = false;
           if (BackgroundService) BackgroundService.stop().catch(() => {});
-          dismissTTSNotification();
+          updateTTSPlaybackState(false);
           webViewRef.current?.injectJavaScript('tts.stop?.()');
           return;
         }
+
+        // Fin de la novela o último capítulo
         webViewRef.current?.injectJavaScript('tts.next?.()');
       };
-      setTimeout(handleEmptyText, 50);
+      setTimeout(handleEmptyText, 100); // Un poco más de tiempo para asegurar que la cola está vacía
       return;
     }
 
     const selectedVoice = readerSettingsRef.current.tts?.voice;
 
-    // SOLUCIÓN RADICAL: NO PASAR 'language' NUNCA.
-    // Al omitir esta propiedad, Android usa la configuración regional del dispositivo
-    // y la voz seleccionada sin intentar cambiar de paquete ni anunciar idiomas.
     Speech.speak(processedText, {
       onDone() {
         isSpeakingRef.current = false;
@@ -513,15 +524,20 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
           }
         }
 
-        if (ttsQueueRef.current.length > 0 && nextChapter) {
+        // CAMBIO PRINCIPAL: Lógica duplicada en onDone por seguridad
+        if (nextChapter && !isTransitioningRef.current) {
+          isTransitioningRef.current = true;
           autoStartTTSRef.current = true;
-          navigateChapter('NEXT');
+          setTimeout(() => {
+            navigateChapter('NEXT');
+          }, 200);
           return;
         }
+
         if (isBackground) {
           isTTSReadingRef.current = false;
           if (BackgroundService) BackgroundService.stop().catch(() => {});
-          dismissTTSNotification();
+          updateTTSPlaybackState(false);
           webViewRef.current?.injectJavaScript('tts.stop?.()');
           return;
         }
@@ -546,7 +562,6 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       voice: selectedVoice?.identifier,
       pitch: readerSettingsRef.current.tts?.pitch || 1,
       rate: readerSettingsRef.current.tts?.rate || 1,
-      // language: ELIMINADO INTENCIONALMENTE para evitar anuncios de idioma.
     });
   };
 
@@ -586,6 +601,9 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       javaScriptEnabled={true}
       webviewDebuggingEnabled={__DEV__}
       onLoadEnd={() => {
+        // Resetear bandera de transición al cargar nuevo capítulo
+        isTransitioningRef.current = false;
+        
         const currentBatteryLevel = getBatteryLevelSync();
         webViewRef.current?.injectJavaScript(
           `if (window.reader && window.reader.batteryLevel) {
@@ -723,7 +741,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
               isTTSReadingRef.current = false;
               ttsQueueRef.current = [];
               ttsQueueIndexRef.current = 0;
-              dismissTTSNotification();
+              updateTTSPlaybackState(false);
             }
             break;
           case 'tts-state':
