@@ -220,7 +220,9 @@ const TTSTab: React.FC = () => {
         contentContainerStyle={styles.contentContainer}
       >
         <View style={styles.section}>
-          <List.SubHeader theme={theme}>Text to Speech</List.SubHeader>
+          <List.SubHeader theme={theme}>
+            <Text style={{ color: theme.onSurface }}>{'Text to Speech'}</Text>
+          </List.SubHeader>
 
           <ReaderSheetPreferenceItem
             label="Enable TTS"
