@@ -58,6 +58,7 @@ export default function useChapter(
   const [[nextChapter, prevChapter], setAdjacentChapter] = useState<
     ChapterInfo[] | undefined[]
   >([]);
+
   const {
     autoScroll,
     autoScrollInterval,
@@ -65,6 +66,7 @@ export default function useChapter(
     useVolumeButtons,
     volumeButtonsOffset,
   } = useChapterGeneralSettings();
+
   const { incognitoMode } = useLibrarySettings();
   const [error, setError] = useState<string>();
   const { tracker } = useTracker();
@@ -106,9 +108,11 @@ export default function useChapter(
 
   useEffect(() => {
     return () => {
+      // Cancela el audio y los callbacks pertenecientes al capítulo anterior.
+      // También detiene el TTS cuando el lector se desmonta completamente.
       Speech.stop();
     };
-  }, []);
+  }, [chapter.id]);
 
   const loadChapterText = useCallback(
     async (id: number, path: string) => {
