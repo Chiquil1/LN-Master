@@ -76,11 +76,13 @@ export default function useChapter(
       volumeButtonsOffset,
       Math.round(Dimensions.get('window').height * 0.75),
     );
+
     emmiter.addListener('VolumeUp', () => {
       webViewRef.current?.injectJavaScript(`(()=>{
         window.scrollBy({top: -${offset}, behavior: 'smooth'})
       })()`);
     });
+
     emmiter.addListener('VolumeDown', () => {
       webViewRef.current?.injectJavaScript(`(()=>{
         window.scrollBy({top: ${offset}, behavior: 'smooth'})
@@ -94,20 +96,25 @@ export default function useChapter(
     } else {
       emmiter.removeAllListeners('VolumeUp');
       emmiter.removeAllListeners('VolumeDown');
-      // this is just for sure, without it app still works properly
     }
 
     return () => {
       emmiter.removeAllListeners('VolumeUp');
       emmiter.removeAllListeners('VolumeDown');
+    };
+  }, [useVolumeButtons, connectVolumeButton]);
+
+  useEffect(() => {
+    return () => {
       Speech.stop();
     };
-  }, [useVolumeButtons, chapter, connectVolumeButton]);
+  }, []);
 
   const loadChapterText = useCallback(
     async (id: number, path: string) => {
       const filePath = `${NOVEL_STORAGE}/${novel.pluginId}/${chapter.novelId}/${id}/index.html`;
       let text = '';
+
       if (NativeFile.exists(filePath)) {
         text = NativeFile.readFile(filePath);
       } else {
@@ -117,6 +124,7 @@ export default function useChapter(
           })
           .catch(e => setError(e.message));
       }
+
       return text;
     },
     [chapter.novelId, novel.pluginId],
@@ -128,9 +136,11 @@ export default function useChapter(
         const dbChapter = navChapter
           ? undefined
           : await getDbChapter(chapter.id);
+
         const chap = dbChapter ?? navChapter ?? chapter;
         const cachedText = chapterTextCache.read(chap.id);
         const text = cachedText ?? loadChapterText(chap.id, chap.path);
+
         const [nextChapResult, prevChapResult, awaitedText] = await Promise.all(
           [
             getNextChapter(chap.novelId, chap.position!, chap.page ?? ''),
@@ -145,21 +155,29 @@ export default function useChapter(
 
         // Pre-fetch adjacent page chapters if at a page boundary
         const currentPage = Number(chap.page);
+
         if (!nextChap && totalPages > 0 && currentPage < totalPages) {
           const nextPage = String(currentPage + 1);
+
           try {
             const count = await getChapterCount(chap.novelId, nextPage);
+
             if (count === 0) {
               const sourcePage = await fetchPage(
                 novel.pluginId,
                 novel.path,
                 nextPage,
               );
+
               await insertChapters(
                 chap.novelId,
-                sourcePage.chapters.map(ch => ({ ...ch, page: nextPage })),
+                sourcePage.chapters.map(ch => ({
+                  ...ch,
+                  page: nextPage,
+                })),
               );
             }
+
             nextChap = await getNextChapter(
               chap.novelId,
               chap.position!,
@@ -167,21 +185,29 @@ export default function useChapter(
             );
           } catch {}
         }
+
         if (!prevChap && currentPage > 1) {
           const prevPage = String(currentPage - 1);
+
           try {
             const count = await getChapterCount(chap.novelId, prevPage);
+
             if (count === 0) {
               const sourcePage = await fetchPage(
                 novel.pluginId,
                 novel.path,
                 prevPage,
               );
+
               await insertChapters(
                 chap.novelId,
-                sourcePage.chapters.map(ch => ({ ...ch, page: prevPage })),
+                sourcePage.chapters.map(ch => ({
+                  ...ch,
+                  page: prevPage,
+                })),
               );
             }
+
             prevChap = await getPrevChapter(
               chap.novelId,
               chap.position!,
@@ -196,10 +222,13 @@ export default function useChapter(
             loadChapterText(nextChap.id, nextChap.path),
           );
         }
+
         if (!cachedText) {
           chapterTextCache.write(chap.id, text);
         }
+
         setChapter(chap);
+
         setChapterText(
           sanitizeChapterText(
             novel.pluginId,
@@ -208,6 +237,7 @@ export default function useChapter(
             awaitedText,
           ),
         );
+
         setAdjacentChapter([nextChap!, prevChap!]);
       } catch (e: any) {
         setError(e.message);
@@ -230,6 +260,7 @@ export default function useChapter(
   );
 
   const scrollInterval = useRef<NodeJS.Timeout>(null);
+
   useEffect(() => {
     if (autoScroll) {
       scrollInterval.current = setInterval(() => {
@@ -240,10 +271,8 @@ export default function useChapter(
           )},behavior:'smooth'})
         })()`);
       }, autoScrollInterval * 1000);
-    } else {
-      if (scrollInterval.current) {
-        clearInterval(scrollInterval.current);
-      }
+    } else if (scrollInterval.current) {
+      clearInterval(scrollInterval.current);
     }
 
     return () => {
@@ -255,8 +284,11 @@ export default function useChapter(
 
   const updateTracker = useCallback(() => {
     const chapterNumber = parseChapterNumber(novel.name, chapter.name);
+
     if (tracker && trackedNovel && chapterNumber > trackedNovel.progress) {
-      updateAllTrackedNovels({ progress: chapterNumber });
+      updateAllTrackedNovels({
+        progress: chapterNumber,
+      });
     }
   }, [chapter.name, novel.name, trackedNovel, tracker, updateAllTrackedNovels]);
 
@@ -289,12 +321,14 @@ export default function useChapter(
       webViewRef.current?.injectJavaScript('reader.hidden.val = false');
       showStatusAndNavBar();
     }
+
     setHidden(!hidden);
   }, [hidden, setImmersiveMode, showStatusAndNavBar, webViewRef]);
 
   const navigateChapter = useCallback(
     (position: 'NEXT' | 'PREV') => {
       let nextNavChapter;
+
       if (position === 'NEXT') {
         nextNavChapter = nextChapter;
       } else if (position === 'PREV') {
@@ -302,9 +336,8 @@ export default function useChapter(
       } else {
         return;
       }
-      if (nextNavChapter) {
-        // setLoading(true);
 
+      if (nextNavChapter) {
         getChapter(nextNavChapter);
       } else {
         showToast(
