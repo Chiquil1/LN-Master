@@ -19,7 +19,7 @@ interface Props {
   theme: ThemeColors;
 }
 
-const DiscoverCard: React.FC<Props> = ({
+const DiscoverCardComponent: React.FC<Props> = ({
   theme,
   icon,
   trackerName,
@@ -48,7 +48,7 @@ const DiscoverCard: React.FC<Props> = ({
   );
 };
 
-export default DiscoverCard;
+export default React.memo(DiscoverCardComponent);
 
 const styles = StyleSheet.create({
   container: {

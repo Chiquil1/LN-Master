@@ -227,6 +227,11 @@ const BrowseALScreen = ({ navigation }: BrowseALScreenProps) => {
               </View>
             ) : null
           }
+          initialNumToRender={10}
+          windowSize={21}
+          removeClippedSubviews
+          maxToRenderPerBatch={10}
+          updateCellsBatchingPeriod={50}
         />
       )}
     </SafeAreaView>
