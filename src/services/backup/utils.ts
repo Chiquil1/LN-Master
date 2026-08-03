@@ -184,17 +184,17 @@ export const restoreData = async (cacheDirPath: string) => {
 
             await _restoreNovelAndChapters(backupNovel);
             novelCount++;
-              } catch (error: unknown) {
-                failedCount++;
-                const novelName =
-                  item.path.split('/').pop()?.replace('.json', '') || 'Unknown';
-                showToast(
-                  getString('backupScreen.novelRestoreFailed', {
-                    novelName: novelName,
-                    error: getErrorMessage(error),
-                  }),
-                );
-              }
+          } catch (error: unknown) {
+            failedCount++;
+            const novelName =
+              item.path.split('/').pop()?.replace('.json', '') || 'Unknown';
+            showToast(
+              getString('backupScreen.novelRestoreFailed', {
+                novelName: novelName,
+                error: getErrorMessage(error),
+              }),
+            );
+          }
         }
       }
     } catch (error: unknown) {
@@ -233,15 +233,15 @@ export const restoreData = async (cacheDirPath: string) => {
         try {
           _restoreCategory(category);
           categoryCount++;
-            } catch (error: unknown) {
-              failedCategoryCount++;
-              showToast(
-                getString('backupScreen.categoryRestoreFailed', {
-                  categoryName: category.name || category.id.toString(),
-                  error: getErrorMessage(error),
-                }),
-              );
-            }
+        } catch (error: unknown) {
+          failedCategoryCount++;
+          showToast(
+            getString('backupScreen.categoryRestoreFailed', {
+              categoryName: category.name || category.id.toString(),
+              error: getErrorMessage(error),
+            }),
+          );
+        }
       }
     } catch (error: unknown) {
       showToast(

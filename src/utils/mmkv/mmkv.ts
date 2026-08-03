@@ -17,7 +17,9 @@ export function setMMKVObject<T = unknown>(key: string, obj: T): void {
 }
 
 export function deleteMMKVKey(key: string): void {
-  const maybeDelete = (MMKVStorage as unknown as { delete?: (k: string) => void }).delete;
+  const maybeDelete = (
+    MMKVStorage as unknown as { delete?: (k: string) => void }
+  ).delete;
   if (typeof maybeDelete === 'function') {
     maybeDelete.call(MMKVStorage, key);
   }

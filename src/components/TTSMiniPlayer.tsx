@@ -15,13 +15,8 @@ import IconButton from './IconButtonV2/IconButtonV2';
 
 const TTSMiniPlayer: React.FC = () => {
   const theme = useTheme();
-  const {
-    queue,
-    currentChapterIndex,
-    isPlaying,
-    setIsPlaying,
-    clearQueue,
-  } = useTTSStore();
+  const { queue, currentChapterIndex, isPlaying, setIsPlaying, clearQueue } =
+    useTTSStore();
 
   const currentItem = queue[currentChapterIndex];
   const isVisible = queue.length > 0;
@@ -91,10 +86,16 @@ const TTSMiniPlayer: React.FC = () => {
       ]}
     >
       <View style={styles.meta}>
-        <Text style={[styles.title, { color: theme.onSurface }]} numberOfLines={1}>
+        <Text
+          style={[styles.title, { color: theme.onSurface }]}
+          numberOfLines={1}
+        >
           {currentItem.chapterName || 'TTS'}
         </Text>
-        <Text style={[styles.subtitle, { color: theme.onSurfaceVariant }]} numberOfLines={1}>
+        <Text
+          style={[styles.subtitle, { color: theme.onSurfaceVariant }]}
+          numberOfLines={1}
+        >
           {`Chapter ${currentChapterIndex + 1} of ${queue.length}`}
         </Text>
       </View>
@@ -109,16 +110,8 @@ const TTSMiniPlayer: React.FC = () => {
           onPress={handleTogglePlay}
           theme={theme}
         />
-        <IconButton
-          name="skip-next"
-          onPress={nextTTSWebView}
-          theme={theme}
-        />
-        <IconButton
-          name="stop"
-          onPress={handleStop}
-          theme={theme}
-        />
+        <IconButton name="skip-next" onPress={nextTTSWebView} theme={theme} />
+        <IconButton name="stop" onPress={handleStop} theme={theme} />
       </View>
     </Pressable>
   );

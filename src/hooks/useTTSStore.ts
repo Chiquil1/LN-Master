@@ -39,10 +39,18 @@ export const useTTSStore = create<TTSState>()(
       addQueueItem: (item: TTSQueueItem): void => {
         set(state => ({ queue: [...state.queue, item] }));
       },
-      clearQueue: (): void => { set({ queue: [], currentChapterIndex: 0 }); },
-      setCurrentChapterIndex: (index: number): void => { set({ currentChapterIndex: index }); },
-      setIsPlaying: (value: boolean): void => { set({ isPlaying: value }); },
-      setIsLoadingNext: (value: boolean): void => { set({ isLoadingNext: value }); },
+      clearQueue: (): void => {
+        set({ queue: [], currentChapterIndex: 0 });
+      },
+      setCurrentChapterIndex: (index: number): void => {
+        set({ currentChapterIndex: index });
+      },
+      setIsPlaying: (value: boolean): void => {
+        set({ isPlaying: value });
+      },
+      setIsLoadingNext: (value: boolean): void => {
+        set({ isLoadingNext: value });
+      },
       updateCurrentItemCurrentIndex: (index: number): void => {
         const state = get();
         const currentChapterIndex = state.currentChapterIndex;
@@ -99,12 +107,14 @@ export const useTTSStore = create<TTSState>()(
           // Use typed helper to avoid `any` cast spread across the codebase
           try {
             // lazy import to avoid circular imports
-             
+
             const { deleteMMKVKey } = require('@utils/mmkv/mmkv');
             deleteMMKVKey(name);
           } catch {
             // fallback to best-effort delete
-            (MMKVStorage as unknown as { delete?: (k: string) => void }).delete?.(name);
+            (
+              MMKVStorage as unknown as { delete?: (k: string) => void }
+            ).delete?.(name);
           }
         },
       })),

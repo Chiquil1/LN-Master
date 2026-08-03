@@ -36,13 +36,17 @@ export const nextTTSWebView = () =>
   injectToWebView(`if (window.tts) { tts.next?.(); }`);
 
 export const prevTTSWebView = () =>
-  injectToWebView(`if (window.tts && window.reader && window.reader.prevChapter) { window.reader.post({ type: 'prev', autoStartTTS: true }); }`);
+  injectToWebView(
+    `if (window.tts && window.reader && window.reader.prevChapter) { window.reader.post({ type: 'prev', autoStartTTS: true }); }`,
+  );
 
 export const rewindTTSWebView = () =>
   injectToWebView(`if (window.tts && tts.started) { tts.rewind(); }`);
 
 export const seekTTSWebView = (position: number) =>
-  injectToWebView(`if (window.tts && tts.started) { tts.seekTo(${position}); }`);
+  injectToWebView(
+    `if (window.tts && tts.started) { tts.seekTo(${position}); }`,
+  );
 
 export const pauseAudio = () => {
   if (typeof Speech.pause === 'function') {

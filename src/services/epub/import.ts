@@ -119,7 +119,8 @@ export const importEpub = async (
   if (novel.chapters && novel.chapters.length) {
     // Prepare DB rows for batch insert (so we can get inserted ids)
     const rows = novel.chapters.map((chapter, i) => {
-      const name = chapter.name || chapter.path.split(/[/\\]/).pop() || 'unknown';
+      const name =
+        chapter.name || chapter.path.split(/[/\\]/).pop() || 'unknown';
       return {
         novelId,
         name,
@@ -131,7 +132,11 @@ export const importEpub = async (
     });
 
     const inserted: Array<{ id: number }> = await dbManager.write(async tx => {
-      return tx.insert(chapterSchema).values(rows).returning({ id: chapterSchema.id }).all();
+      return tx
+        .insert(chapterSchema)
+        .values(rows)
+        .returning({ id: chapterSchema.id })
+        .all();
     });
 
     // Write chapter files in parallel with limited concurrency
@@ -140,7 +145,8 @@ export const importEpub = async (
     const tasks = inserted.map((ins, idx) => async () => {
       const chapter = novel.chapters![idx];
       const insertedId = ins.id;
-      const name = chapter.name || chapter.path.split(/[/\\]/).pop() || 'unknown';
+      const name =
+        chapter.name || chapter.path.split(/[/\\]/).pop() || 'unknown';
       setMeta(meta => ({ ...meta, progressText: name }));
 
       let chapterText = '';

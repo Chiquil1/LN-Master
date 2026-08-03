@@ -1,5 +1,11 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
-import { View, StyleSheet, Text, ScrollView, TouchableOpacity } from 'react-native';
+import {
+  View,
+  StyleSheet,
+  Text,
+  ScrollView,
+  TouchableOpacity,
+} from 'react-native';
 import { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import Slider from '@react-native-community/slider';
 import { getAvailableVoicesAsync, Voice } from 'expo-speech';
@@ -27,7 +33,7 @@ const VoicePickerModal: React.FC<VoicePickerModalProps> = ({
   onDismiss,
   voices,
   onSelect,
-  currentVoice
+  currentVoice,
 }) => {
   const theme = useTheme();
   const [selectedLanguages, setSelectedLanguages] = useState<string[]>([]);
@@ -93,7 +99,7 @@ const VoicePickerModal: React.FC<VoicePickerModalProps> = ({
         onDismiss={onDismiss}
         contentContainerStyle={[
           styles.modalContent,
-          { backgroundColor: theme.surface }
+          { backgroundColor: theme.surface },
         ]}
       >
         <Text style={[styles.modalTitle, { color: theme.onSurface }]}>
@@ -110,11 +116,12 @@ const VoicePickerModal: React.FC<VoicePickerModalProps> = ({
             showsHorizontalScrollIndicator={false}
             style={styles.languageChipsScroll}
           >
-              {availableLanguages.map(lang => {
+            {availableLanguages.map(lang => {
               const isSelected = selectedLanguages.includes(lang);
               const isSystemLang = lang === systemLocale;
               const showingSystemOnly = selectedLanguages.length === 0;
-              const isActive = isSelected || (showingSystemOnly && isSystemLang);
+              const isActive =
+                isSelected || (showingSystemOnly && isSystemLang);
 
               return (
                 <Chip
@@ -123,17 +130,21 @@ const VoicePickerModal: React.FC<VoicePickerModalProps> = ({
                   onPress={() => toggleLanguage(lang)}
                   style={[
                     styles.languageChip,
-                    isActive && { backgroundColor: theme.primary }
+                    isActive && { backgroundColor: theme.primary },
                   ]}
                   textStyle={[
                     styles.languageChipText,
-                    { color: isActive ? theme.onPrimary : theme.onSurface }
+                    { color: isActive ? theme.onPrimary : theme.onSurface },
                   ]}
                 >
-                    <Text style={{ color: isActive ? theme.onPrimary : theme.onSurface }}>
-                      {lang.toUpperCase()}
-                      {isSystemLang ? ' (System)' : ''}
-                    </Text>
+                  <Text
+                    style={{
+                      color: isActive ? theme.onPrimary : theme.onSurface,
+                    }}
+                  >
+                    {lang.toUpperCase()}
+                    {isSystemLang ? ' (System)' : ''}
+                  </Text>
                 </Chip>
               );
             })}
@@ -143,7 +154,9 @@ const VoicePickerModal: React.FC<VoicePickerModalProps> = ({
         {/* Voice List */}
         <ScrollView style={styles.voiceList}>
           {filteredVoices.length === 0 ? (
-            <Text style={[styles.noVoicesText, { color: theme.onSurfaceVariant }]}>
+            <Text
+              style={[styles.noVoicesText, { color: theme.onSurfaceVariant }]}
+            >
               No voices available for selected languages
             </Text>
           ) : (
@@ -154,7 +167,7 @@ const VoicePickerModal: React.FC<VoicePickerModalProps> = ({
                   styles.voiceItem,
                   currentVoice?.identifier === voice.identifier && {
                     backgroundColor: theme.surfaceVariant,
-                  }
+                  },
                 ]}
                 onPress={() => {
                   onSelect(voice);
@@ -162,17 +175,26 @@ const VoicePickerModal: React.FC<VoicePickerModalProps> = ({
                 }}
               >
                 <View style={styles.voiceItemContent}>
-                  <Text style={[styles.voiceItemText, { color: theme.onSurface }]}>
+                  <Text
+                    style={[styles.voiceItemText, { color: theme.onSurface }]}
+                  >
                     {voice.name}
                   </Text>
                   {voice.language && (
-                    <Text style={[styles.voiceItemLanguage, { color: theme.onSurfaceVariant }]}>
+                    <Text
+                      style={[
+                        styles.voiceItemLanguage,
+                        { color: theme.onSurfaceVariant },
+                      ]}
+                    >
                       {voice.language}
                     </Text>
                   )}
                 </View>
                 {currentVoice?.identifier === voice.identifier && (
-                  <Text style={[styles.checkIcon, { color: theme.primary }]}>✓</Text>
+                  <Text style={[styles.checkIcon, { color: theme.primary }]}>
+                    ✓
+                  </Text>
                 )}
               </TouchableOpacity>
             ))
@@ -192,10 +214,8 @@ const VoicePickerModal: React.FC<VoicePickerModalProps> = ({
 
 const TTSTab: React.FC = () => {
   const theme = useTheme();
-  const {
-    TTSEnable = true,
-    setChapterGeneralSettings,
-  } = useChapterGeneralSettings();
+  const { TTSEnable = true, setChapterGeneralSettings } =
+    useChapterGeneralSettings();
 
   const { tts, setChapterReaderSettings } = useChapterReaderSettings();
   const [voices, setVoices] = useState<Voice[]>([]);
@@ -208,9 +228,12 @@ const TTSTab: React.FC = () => {
     });
   }, []);
 
-  const handleVoiceSelect = useCallback((voice: Voice) => {
-    setChapterReaderSettings({ tts: { ...tts, voice } });
-  }, [tts, setChapterReaderSettings]);
+  const handleVoiceSelect = useCallback(
+    (voice: Voice) => {
+      setChapterReaderSettings({ tts: { ...tts, voice } });
+    },
+    [tts, setChapterReaderSettings],
+  );
 
   return (
     <>
@@ -227,9 +250,7 @@ const TTSTab: React.FC = () => {
           <ReaderSheetPreferenceItem
             label="Enable TTS"
             value={TTSEnable}
-            onPress={() =>
-              setChapterGeneralSettings({ TTSEnable: !TTSEnable })
-            }
+            onPress={() => setChapterGeneralSettings({ TTSEnable: !TTSEnable })}
             theme={theme}
           />
 
@@ -290,7 +311,10 @@ const TTSTab: React.FC = () => {
                 value={tts?.autoPageAdvance === true}
                 onPress={() =>
                   setChapterReaderSettings({
-                    tts: { ...tts, autoPageAdvance: !(tts?.autoPageAdvance === true) },
+                    tts: {
+                      ...tts,
+                      autoPageAdvance: !(tts?.autoPageAdvance === true),
+                    },
                   })
                 }
                 theme={theme}

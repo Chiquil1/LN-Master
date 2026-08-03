@@ -227,7 +227,9 @@ export const BUILD_TYPE: string = ${JSON.stringify(buildType)};
 export const GIT_HASH: string = ${JSON.stringify(gitHash)};
 export const RELEASE_DATE: string = ${JSON.stringify(releaseDate)};
 export const NODE_ENV: string = ${JSON.stringify(nodeEnv)};
-export const MYANIMELIST_CLIENT_ID: string = ${JSON.stringify(myanimelistClientId)};
+export const MYANIMELIST_CLIENT_ID: string = ${JSON.stringify(
+  myanimelistClientId,
+)};
 export const ANILIST_CLIENT_ID: string = ${JSON.stringify(anilistClientId)};
 
 export default {

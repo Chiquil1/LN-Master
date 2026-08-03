@@ -418,7 +418,10 @@ export const updateNovelCategories = async (
         const missing = novelIds.filter(nid => !existingSet.has(nid));
 
         if (missing.length) {
-          const values = missing.map(novelId => ({ novelId, categoryId: defaultCategory.id }));
+          const values = missing.map(novelId => ({
+            novelId,
+            categoryId: defaultCategory.id,
+          }));
           await tx.insert(novelCategorySchema).values(values).run();
         }
       }

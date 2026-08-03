@@ -135,7 +135,9 @@ const LibraryViewComponent: React.FC<Props> = ({
   );
 };
 
-export const LibraryView = React.memo(LibraryViewComponent) as typeof LibraryViewComponent;
+export const LibraryView = React.memo(
+  LibraryViewComponent,
+) as typeof LibraryViewComponent;
 const styles = StyleSheet.create({
   flex: { flex: 1 },
 });
