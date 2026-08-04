@@ -29,8 +29,8 @@ import {
   initialChapterReaderSettings,
 } from '@hooks/persisted/useSettings';
 import { getBatteryLevelSync } from 'react-native-device-info';
-import * as Speech from 'expo-speech';
 import { PLUGIN_STORAGE } from '@utils/Storages';
+import NativeTTSMediaControl from '@specs/NativeTTSMediaControl';
 import { useChapterContext } from '../ChapterContext';
 import { useTTSStore } from '@hooks/useTTSStore';
 import {
@@ -113,6 +113,8 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
   const readerSettingsRef = useRef<ChapterReaderSettings>(readerSettings);
   const appStateRef = useRef(AppState.currentState);
   const isSpeakingRef = useRef<boolean>(false);
+  const nativePlaybackStartedRef = useRef<boolean>(false);
+  const nativePlaybackPausedRef = useRef<boolean>(false);
   const isAutoStartingRef = useRef<boolean>(false);
   const isTransitioningRef = useRef<boolean>(false);
   const ttsSegmentsRef = useRef<string[]>([]);
@@ -151,6 +153,8 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
     speechSessionRef.current += 1;
     isSpeakingRef.current = false;
     isAutoStartingRef.current = false;
+    nativePlaybackStartedRef.current = false;
+    nativePlaybackPausedRef.current = false;
     ttsSegmentsRef.current = [];
     ttsIndexRef.current = 0;
     ttsChapterIdRef.current = null;
@@ -182,8 +186,10 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
 
       // Invalida todos los callbacks del párrafo o capítulo anterior.
       speechSessionRef.current += 1;
-      Speech.stop();
+      NativeTTSMediaControl.stopNativePlayback();
       isSpeakingRef.current = false;
+      nativePlaybackStartedRef.current = false;
+      nativePlaybackPausedRef.current = false;
 
       const navigateWhenActive = () => {
         if (pendingNavigationRef.current !== position) {
@@ -285,6 +291,9 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
 
   useEffect(() => {
     const playListener = ttsMediaEmitter.addListener('TTSPlay', () => {
+      nativePlaybackPausedRef.current = false;
+      isSpeakingRef.current = true;
+      NativeTTSMediaControl.resumePlayback();
       webViewRef.current?.injectJavaScript(`
         if (window.tts && !tts.reading) { tts.resume(); }
         true;
@@ -292,6 +301,9 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
     });
 
     const pauseListener = ttsMediaEmitter.addListener('TTSPause', () => {
+      nativePlaybackPausedRef.current = true;
+      isSpeakingRef.current = false;
+      NativeTTSMediaControl.pausePlayback();
       webViewRef.current?.injectJavaScript(`
         if (window.tts && tts.reading) { tts.pause(); }
         true;
@@ -300,7 +312,8 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
 
     const stopListener = ttsMediaEmitter.addListener('TTSStop', () => {
       speechSessionRef.current += 1;
-      Speech.stop();
+      nativePlaybackStartedRef.current = false;
+      nativePlaybackPausedRef.current = false;
       isSpeakingRef.current = false;
       webViewRef.current?.injectJavaScript(`
         if (window.tts) { tts.stop(); }
@@ -309,10 +322,9 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
     });
 
     const rewindListener = ttsMediaEmitter.addListener('TTSRewind', () => {
-      webViewRef.current?.injectJavaScript(`
-        if (window.tts && tts.started) { tts.rewind(); }
-        true;
-      `);
+      // El servicio reinicia el párrafo actual y emitirá TTSNativeSegment
+      // cuando comience. Evitamos reiniciar también el motor del WebView.
+      nativePlaybackPausedRef.current = false;
     });
 
     const prevListener = ttsMediaEmitter.addListener('TTSPrev', () => {
@@ -334,6 +346,83 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       },
     );
 
+    const segmentListener = ttsMediaEmitter.addListener(
+      'TTSNativeSegment',
+      (event: { position?: number }) => {
+        const index = event.position;
+
+        if (
+          typeof index !== 'number' ||
+          index < 0 ||
+          index >= ttsSegmentsRef.current.length
+        ) {
+          return;
+        }
+
+        nativePlaybackStartedRef.current = true;
+        nativePlaybackPausedRef.current = false;
+        isSpeakingRef.current = true;
+        ttsIndexRef.current = index;
+        updateCurrentItemCurrentIndex(index);
+        updateTTSProgress(index, ttsSegmentsRef.current.length);
+
+        webViewRef.current?.injectJavaScript(`
+          (function() {
+            if (!window.tts || !window.tts.allReadableElements) { return; }
+            var idx = ${index};
+            if (idx >= tts.allReadableElements.length) { return; }
+            if (tts.currentElement) {
+              tts.currentElement.classList.remove('highlight');
+            }
+            tts.elementsRead = idx;
+            tts.currentElement = tts.allReadableElements[idx];
+            tts.prevElement = null;
+            tts.started = true;
+            tts.reading = true;
+            tts.currentElement.classList.add('highlight');
+            tts.scrollToElement(tts.currentElement);
+          })();
+          true;
+        `);
+      },
+    );
+
+    const queueFinishedListener = ttsMediaEmitter.addListener(
+      'TTSNativeQueueFinished',
+      () => {
+        if (!nativePlaybackStartedRef.current) {
+          return;
+        }
+
+        nativePlaybackStartedRef.current = false;
+        nativePlaybackPausedRef.current = false;
+        isSpeakingRef.current = false;
+
+        if (nextChapter) {
+          requestChapterNavigation('NEXT');
+          return;
+        }
+
+        isTTSReadingRef.current = false;
+        setTTSIsPlaying(false);
+        clearTTSQueue();
+        setTTSCurrentChapterIndex(0);
+        updateTTSPlaybackState(false);
+        NativeTTSMediaControl.stopNativePlayback();
+        webViewRef.current?.injectJavaScript(`
+          if (window.tts) { tts.stop(); }
+          true;
+        `);
+      },
+    );
+
+    const nativeErrorListener = ttsMediaEmitter.addListener(
+      'TTSNativeError',
+      (event: { message?: string }) => {
+        console.warn('[TTS] Error del motor nativo:', event.message);
+      },
+    );
+
     return () => {
       playListener.remove();
       pauseListener.remove();
@@ -342,8 +431,19 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       prevListener.remove();
       nextListener.remove();
       seekToListener.remove();
+      segmentListener.remove();
+      queueFinishedListener.remove();
+      nativeErrorListener.remove();
     };
-  }, [requestChapterNavigation, webViewRef]);
+  }, [
+    clearTTSQueue,
+    nextChapter,
+    requestChapterNavigation,
+    setTTSCurrentChapterIndex,
+    setTTSIsPlaying,
+    updateCurrentItemCurrentIndex,
+    webViewRef,
+  ]);
 
   useEffect(() => {
     if (isTTSReadingRef.current) {
@@ -361,7 +461,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       if (!isTTSReadingRef.current) {
         updateTTSPlaybackState(false);
       }
-      Speech.stop();
+      NativeTTSMediaControl.stopNativePlayback();
       isSpeakingRef.current = false;
     };
   }, []);
@@ -375,8 +475,10 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
             initialChapterReaderSettings;
           setReaderSettings(newSettings);
 
-          Speech.stop();
+          NativeTTSMediaControl.stopNativePlayback();
           isSpeakingRef.current = false;
+          nativePlaybackStartedRef.current = false;
+          nativePlaybackPausedRef.current = false;
 
           webViewRef.current?.injectJavaScript(
             `
@@ -646,107 +748,44 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       return;
     }
 
-    ttsIndexRef.current = index;
-
-    let processedText = cleanTextForTTS(text);
-
-    processedText = processedText
-      .replace(/\\/g, '')
-      .replace(/""/g, '"')
-      .replace(/\\'/g, "'")
-      .replace(/\\"/g, '"')
-      .replace(/[`]/g, '')
-      .replace(/\s+/g, ' ')
-      .trim();
-
-    const advanceToNextSegment = () => {
-      if (sessionId !== speechSessionRef.current) {
-        return;
-      }
-
-      isSpeakingRef.current = false;
-      const segments = ttsSegmentsRef.current;
-      const nextIndex = index + 1;
-
-      if (nextIndex < segments.length) {
-        const nextText = segments[nextIndex];
-
-        if (nextText) {
-          ttsIndexRef.current = nextIndex;
-          updateCurrentItemCurrentIndex(nextIndex);
-
-          webViewRef.current?.injectJavaScript(`
-            (function() {
-              if (window.tts && window.tts.allReadableElements) {
-                var idx = ${nextIndex};
-                if (idx < tts.allReadableElements.length) {
-                  if (tts.currentElement) {
-                    tts.currentElement.classList.remove('highlight');
-                  }
-                  tts.elementsRead = idx;
-                  tts.currentElement = tts.allReadableElements[idx];
-                  if (tts.currentElement) {
-                    tts.currentElement.classList.add('highlight');
-                    tts.scrollToElement(tts.currentElement);
-                  }
-                }
-              }
-            })();
-            true;
-          `);
-
-          speakText(nextText, nextIndex, sessionId);
-          return;
-        }
-      }
-
-      if (nextChapter) {
-        requestChapterNavigation('NEXT');
-        return;
-      }
-
-      isTTSReadingRef.current = false;
-      setTTSIsPlaying(false);
-      updateTTSPlaybackState(false);
-      webViewRef.current?.injectJavaScript(`
-        if (window.tts) { tts.stop(); }
-        true;
-      `);
-    };
-
-    if (!processedText || processedText.length < 2) {
-      setTimeout(advanceToNextSegment, 100);
+    if (
+      nativePlaybackStartedRef.current &&
+      nativePlaybackPausedRef.current &&
+      index === ttsIndexRef.current
+    ) {
+      nativePlaybackPausedRef.current = false;
+      isSpeakingRef.current = true;
+      NativeTTSMediaControl.resumePlayback();
       return;
     }
 
-    if (isSpeakingRef.current) {
-      Speech.stop();
-    }
-
-    isSpeakingRef.current = true;
     const selectedVoice = readerSettingsRef.current.tts?.voice;
+    const segments =
+      ttsSegmentsRef.current.length > 0 ? ttsSegmentsRef.current : [text];
+    const preparedSegments = segments.map(segment =>
+      cleanTextForTTS(segment)
+        .replace(/\\/g, '')
+        .replace(/""/g, '"')
+        .replace(/\\'/g, "'")
+        .replace(/\\"/g, '"')
+        .replace(/[`]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim(),
+    );
 
-    Speech.speak(processedText, {
-      onDone() {
-        advanceToNextSegment();
-      },
-      onStopped() {
-        if (sessionId === speechSessionRef.current) {
-          isSpeakingRef.current = false;
-        }
-      },
-      onError(e) {
-        if (sessionId !== speechSessionRef.current) {
-          return;
-        }
+    ttsIndexRef.current = index;
+    isSpeakingRef.current = true;
+    nativePlaybackStartedRef.current = true;
+    nativePlaybackPausedRef.current = false;
 
-        console.warn('TTS Error:', e);
-        advanceToNextSegment();
-      },
-      voice: selectedVoice?.identifier,
-      pitch: readerSettingsRef.current.tts?.pitch || 1,
-      rate: readerSettingsRef.current.tts?.rate || 1,
-    });
+    NativeTTSMediaControl.startPlayback(
+      JSON.stringify(preparedSegments),
+      index,
+      selectedVoice?.identifier || '',
+      selectedVoice?.language || '',
+      readerSettingsRef.current.tts?.rate || 1,
+      readerSettingsRef.current.tts?.pitch || 1,
+    );
   };
 
   const isRTL = plugin?.lang === 'Arabic' || plugin?.lang === 'Hebrew';
@@ -932,7 +971,6 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
 
               if (isSpeakingRef.current) {
                 speechSessionRef.current += 1;
-                Speech.stop();
                 isSpeakingRef.current = false;
               }
 
@@ -968,13 +1006,15 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
             }
             break;
           case 'pause-speak':
-            speechSessionRef.current += 1;
-            Speech.stop();
+            NativeTTSMediaControl.pausePlayback();
+            nativePlaybackPausedRef.current = true;
             isSpeakingRef.current = false;
             break;
           case 'stop-speak':
             speechSessionRef.current += 1;
-            Speech.stop();
+            NativeTTSMediaControl.stopNativePlayback();
+            nativePlaybackStartedRef.current = false;
+            nativePlaybackPausedRef.current = false;
             isSpeakingRef.current = false;
             if (!autoStartTTSRef.current) {
               isTTSReadingRef.current = false;

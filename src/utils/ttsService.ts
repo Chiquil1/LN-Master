@@ -1,5 +1,5 @@
 import * as React from 'react';
-import * as Speech from 'expo-speech';
+import NativeTTSMediaControl from '@specs/NativeTTSMediaControl';
 
 export type TTSWebViewRef = React.RefObject<{
   injectJavaScript?: (script: string) => void;
@@ -48,16 +48,8 @@ export const seekTTSWebView = (position: number) =>
     `if (window.tts && tts.started) { tts.seekTo(${position}); }`,
   );
 
-export const pauseAudio = () => {
-  if (typeof Speech.pause === 'function') {
-    Speech.pause();
-  }
-};
+export const pauseAudio = () => NativeTTSMediaControl.pausePlayback();
 
-export const resumeAudio = () => {
-  if (typeof Speech.resume === 'function') {
-    Speech.resume();
-  }
-};
+export const resumeAudio = () => NativeTTSMediaControl.resumePlayback();
 
-export const stopAudio = () => Speech.stop();
+export const stopAudio = () => NativeTTSMediaControl.stopNativePlayback();

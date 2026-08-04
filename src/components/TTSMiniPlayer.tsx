@@ -6,6 +6,9 @@ import {
   pauseAudio,
   resumeAudio,
   stopAudio,
+  pauseTTSWebView,
+  resumeTTSWebView,
+  stopTTSWebView,
   nextTTSWebView,
   prevTTSWebView,
 } from '@utils/ttsService';
@@ -24,10 +27,12 @@ const TTSMiniPlayer: React.FC = () => {
   const handleTogglePlay = useCallback(() => {
     if (isPlaying) {
       pauseAudio();
+      pauseTTSWebView();
       setIsPlaying(false);
       updateTTSPlaybackState(false);
     } else {
       resumeAudio();
+      resumeTTSWebView();
       setIsPlaying(true);
       updateTTSPlaybackState(true);
     }
@@ -35,6 +40,7 @@ const TTSMiniPlayer: React.FC = () => {
 
   const handleStop = useCallback(() => {
     stopAudio();
+    stopTTSWebView();
     setIsPlaying(false);
     clearQueue();
     updateTTSPlaybackState(false);
