@@ -133,7 +133,10 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
 
   const currentTTSItem = ttsQueue[ttsCurrentChapterIndex];
   const currentTTSIndex = currentTTSItem?.currentIndex ?? 0;
-  const currentTTSSegments = currentTTSItem?.textSegments ?? [];
+  const currentTTSSegments = useMemo(
+    () => currentTTSItem?.textSegments ?? [],
+    [currentTTSItem],
+  );
 
   useEffect(() => {
     readerSettingsRef.current = readerSettings;

@@ -14,6 +14,7 @@ import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import androidx.media.app.NotificationCompat.MediaStyle
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.modules.core.DeviceEventManagerModule
@@ -21,12 +22,14 @@ import com.lnreader.spec.NativeTTSMediaControlSpec
 import java.io.File
 import java.net.URL
 
-class NativeTTSMediaControl(private val appContext: ReactApplicationContext) :
-    NativeTTSMediaControlSpec(appContext) {
+class NativeTTSMediaControl(
+    private val appContext: ReactApplicationContext,
+) : NativeTTSMediaControlSpec(appContext) {
 
     companion object {
         private const val CHANNEL_ID = "tts-media-controls"
         private const val NOTIFICATION_ID = 1001
+
         private const val ACTION_PLAY = "com.lnreader.TTS_PLAY"
         private const val ACTION_PAUSE = "com.lnreader.TTS_PAUSE"
         private const val ACTION_STOP = "com.lnreader.TTS_STOP"
@@ -47,38 +50,40 @@ class NativeTTSMediaControl(private val appContext: ReactApplicationContext) :
     private var totalDuration: Long = 0L
 
     private val mediaReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
+        override fun onReceive(
+            context: Context,
+            intent: Intent,
+        ) {
             when (intent.action) {
                 ACTION_PLAY -> {
                     isPlaying = true
-                    // Actualizar UI primero para evitar lag visual
                     updateNotification()
                     sendEvent("TTSPlay")
                 }
+
                 ACTION_PAUSE -> {
                     isPlaying = false
                     updateNotification()
                     sendEvent("TTSPause")
                 }
+
                 ACTION_STOP -> {
-                    // No cambiamos isPlaying aquí para permitir reinicio rápido si se desea
                     sendEvent("TTSStop")
-                    // Opcional: actualizar notificación a estado detenido
-                    updateNotification() 
+                    updateNotification()
                 }
+
                 ACTION_PREV -> {
-                    // Forzar actualización visual inmediata antes de navegar
-                    isPlaying = false 
+                    isPlaying = false
                     updateNotification()
                     sendEvent("TTSPrev")
                 }
+
                 ACTION_NEXT -> {
-                    // CRÍTICO: Forzar estado pausa visualmente antes de cambiar de capítulo
-                    // Esto evita que Android espere a que termine el audio actual
                     isPlaying = false
                     updateNotification()
                     sendEvent("TTSNext")
                 }
+
                 ACTION_REWIND -> {
                     updateNotification()
                     sendEvent("TTSRewind")
@@ -88,95 +93,135 @@ class NativeTTSMediaControl(private val appContext: ReactApplicationContext) :
     }
 
     private fun sendEvent(eventName: String) {
-        if (listenerCount > 0) {
-            try {
-                appContext.getJSModule(
-                    DeviceEventManagerModule.RCTDeviceEventEmitter::class.java
-                ).emit(eventName, null)
-            } catch (e: Exception) {
-                // Ignorar errores si JS no está listo (ej. app en background profundo)
-                // El evento se perderá pero la app no crasheará
-            }
+        if (listenerCount <= 0) {
+            return
+        }
+
+        try {
+            appContext
+                .getJSModule(
+                    DeviceEventManagerModule.RCTDeviceEventEmitter::class.java,
+                )
+                .emit(eventName, null)
+        } catch (_: Exception) {
+            // JavaScript puede no estar disponible cuando la aplicación
+            // está suspendida o en segundo plano profundo.
         }
     }
 
     private fun sendSeekEvent(elementIndex: Long) {
-        if (listenerCount > 0) {
-            val params = com.facebook.react.bridge.Arguments.createMap().apply {
-                putInt("position", elementIndex.toInt())
-            }
-            try {
-                appContext.getJSModule(
-                    DeviceEventManagerModule.RCTDeviceEventEmitter::class.java
-                ).emit("TTSSeekTo", params)
-            } catch (e: Exception) {
-                // Ignorar
-            }
+        if (listenerCount <= 0) {
+            return
+        }
+
+        val params =
+            com.facebook.react.bridge.Arguments
+                .createMap()
+                .apply {
+                    putInt(
+                        "position",
+                        elementIndex.toInt(),
+                    )
+                }
+
+        try {
+            appContext
+                .getJSModule(
+                    DeviceEventManagerModule.RCTDeviceEventEmitter::class.java,
+                )
+                .emit(
+                    "TTSSeekTo",
+                    params,
+                )
+        } catch (_: Exception) {
+            // JavaScript puede no estar disponible.
         }
     }
 
     private fun ensureChannel() {
-        val manager = appContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            return
+        }
+
+        val manager =
+            appContext.getSystemService(
+                Context.NOTIFICATION_SERVICE,
+            ) as NotificationManager
+
+        val channel =
+            NotificationChannel(
                 CHANNEL_ID,
                 "TTS Media Controls",
-                NotificationManager.IMPORTANCE_LOW
+                NotificationManager.IMPORTANCE_LOW,
             ).apply {
                 description = "Text-to-speech playback controls"
                 setShowBadge(false)
             }
-            manager.createNotificationChannel(channel)
-        }
+
+        manager.createNotificationChannel(channel)
     }
 
     private fun ensureMediaSession() {
-        if (mediaSession == null) {
-            mediaSession = MediaSessionCompat(appContext, "LNReaderTTS").apply {
-                setCallback(object : MediaSessionCompat.Callback() {
-                    override fun onPlay() {
-                        isPlaying = true
-                        sendEvent("TTSPlay")
-                        updateNotification()
-                    }
+        if (mediaSession != null) {
+            return
+        }
 
-                    override fun onPause() {
-                        isPlaying = false
-                        sendEvent("TTSPause")
-                        updateNotification()
-                    }
+        mediaSession =
+            MediaSessionCompat(
+                appContext,
+                "LNReaderTTS",
+            ).apply {
+                setCallback(
+                    object : MediaSessionCompat.Callback() {
+                        override fun onPlay() {
+                            isPlaying = true
+                            sendEvent("TTSPlay")
+                            updateNotification()
+                        }
 
-                    override fun onStop() {
-                        sendEvent("TTSStop")
-                    }
+                        override fun onPause() {
+                            isPlaying = false
+                            sendEvent("TTSPause")
+                            updateNotification()
+                        }
 
-                    override fun onSkipToPrevious() {
-                        isPlaying = false
-                        updateNotification()
-                        sendEvent("TTSPrev")
-                    }
+                        override fun onStop() {
+                            sendEvent("TTSStop")
+                        }
 
-                    override fun onSkipToNext() {
-                        isPlaying = false
-                        updateNotification()
-                        sendEvent("TTSNext")
-                    }
+                        override fun onSkipToPrevious() {
+                            isPlaying = false
+                            updateNotification()
+                            sendEvent("TTSPrev")
+                        }
 
-                    override fun onSeekTo(pos: Long) {
-                        val elementIndex = pos / 1000L
-                        currentPosition = elementIndex
-                        updateNotification()
-                        sendSeekEvent(elementIndex)
-                    }
-                })
+                        override fun onSkipToNext() {
+                            isPlaying = false
+                            updateNotification()
+                            sendEvent("TTSNext")
+                        }
+
+                        override fun onSeekTo(pos: Long) {
+                            val elementIndex = pos / 1000L
+                            currentPosition = elementIndex
+
+                            updateNotification()
+                            sendSeekEvent(elementIndex)
+                        }
+                    },
+                )
+
                 isActive = true
             }
-        }
     }
 
     private fun registerReceiver() {
-        if (!receiverRegistered) {
-            val filter = IntentFilter().apply {
+        if (receiverRegistered) {
+            return
+        }
+
+        val filter =
+            IntentFilter().apply {
                 addAction(ACTION_PLAY)
                 addAction(ACTION_PAUSE)
                 addAction(ACTION_STOP)
@@ -184,124 +229,197 @@ class NativeTTSMediaControl(private val appContext: ReactApplicationContext) :
                 addAction(ACTION_NEXT)
                 addAction(ACTION_REWIND)
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                appContext.registerReceiver(mediaReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-            } else {
-                appContext.registerReceiver(mediaReceiver, filter)
-            }
-            receiverRegistered = true
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            appContext.registerReceiver(
+                mediaReceiver,
+                filter,
+                Context.RECEIVER_NOT_EXPORTED,
+            )
+        } else {
+            appContext.registerReceiver(
+                mediaReceiver,
+                filter,
+            )
         }
+
+        receiverRegistered = true
     }
 
     private fun buildPendingIntent(action: String): PendingIntent {
-        val intent = Intent(action).setPackage(appContext.packageName)
+        val intent =
+            Intent(action).setPackage(
+                appContext.packageName,
+            )
+
         return PendingIntent.getBroadcast(
             appContext,
             action.hashCode(),
             intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            PendingIntent.FLAG_UPDATE_CURRENT or
+                PendingIntent.FLAG_IMMUTABLE,
         )
     }
 
     private fun getContentIntent(): PendingIntent {
-        val intent = appContext.packageManager.getLaunchIntentForPackage(appContext.packageName)
-            ?: Intent()
+        val intent =
+            appContext.packageManager
+                .getLaunchIntentForPackage(
+                    appContext.packageName,
+                )
+                ?: Intent()
+
         return PendingIntent.getActivity(
             appContext,
             0,
             intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            PendingIntent.FLAG_UPDATE_CURRENT or
+                PendingIntent.FLAG_IMMUTABLE,
         )
     }
 
     private fun updateNotification() {
         val session = mediaSession ?: return
 
-        // Configuración correcta del estado para que Android sepa qué botones mostrar
-        val stateBuilder = PlaybackStateCompat.Builder()
-            .setActions(
-                PlaybackStateCompat.ACTION_PLAY_PAUSE or
-                PlaybackStateCompat.ACTION_STOP or
-                PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
-                PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
-                PlaybackStateCompat.ACTION_SEEK_TO
-            )
-            .setState(
-                if (isPlaying) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED,
-                currentPosition * 1000L,
-                1f // Velocidad de reproducción
-            )
-        session.setPlaybackState(stateBuilder.build())
+        val stateBuilder =
+            PlaybackStateCompat.Builder()
+                .setActions(
+                    PlaybackStateCompat.ACTION_PLAY_PAUSE or
+                        PlaybackStateCompat.ACTION_STOP or
+                        PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
+                        PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
+                        PlaybackStateCompat.ACTION_SEEK_TO,
+                )
+                .setState(
+                    if (isPlaying) {
+                        PlaybackStateCompat.STATE_PLAYING
+                    } else {
+                        PlaybackStateCompat.STATE_PAUSED
+                    },
+                    currentPosition * 1000L,
+                    1f,
+                )
 
-        val metadataBuilder = MediaMetadataCompat.Builder()
-            .putString(MediaMetadataCompat.METADATA_KEY_TITLE, currentSubtitle ?: "")
-            .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, currentTitle ?: "")
-            .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, totalDuration * 1000L)
-        coverBitmap?.let {
-            metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, it)
+        session.setPlaybackState(
+            stateBuilder.build(),
+        )
+
+        val metadataBuilder =
+            MediaMetadataCompat.Builder()
+                .putString(
+                    MediaMetadataCompat.METADATA_KEY_TITLE,
+                    currentSubtitle ?: "",
+                )
+                .putString(
+                    MediaMetadataCompat.METADATA_KEY_ARTIST,
+                    currentTitle ?: "",
+                )
+                .putLong(
+                    MediaMetadataCompat.METADATA_KEY_DURATION,
+                    totalDuration * 1000L,
+                )
+
+        coverBitmap?.let { bitmap ->
+            metadataBuilder.putBitmap(
+                MediaMetadataCompat.METADATA_KEY_ALBUM_ART,
+                bitmap,
+            )
         }
-        session.setMetadata(metadataBuilder.build())
 
-        val playPauseAction = if (isPlaying) {
+        session.setMetadata(
+            metadataBuilder.build(),
+        )
+
+        val playPauseAction =
+            if (isPlaying) {
+                NotificationCompat.Action.Builder(
+                    android.R.drawable.ic_media_pause,
+                    "Pausar",
+                    buildPendingIntent(ACTION_PAUSE),
+                ).build()
+            } else {
+                NotificationCompat.Action.Builder(
+                    android.R.drawable.ic_media_play,
+                    "Reproducir",
+                    buildPendingIntent(ACTION_PLAY),
+                ).build()
+            }
+
+        val prevAction =
             NotificationCompat.Action.Builder(
-                android.R.drawable.ic_media_pause,
-                "Pausar",
-                buildPendingIntent(ACTION_PAUSE)
+                android.R.drawable.ic_media_previous,
+                "Anterior",
+                buildPendingIntent(ACTION_PREV),
             ).build()
-        } else {
+
+        val rewindAction =
             NotificationCompat.Action.Builder(
-                android.R.drawable.ic_media_play,
-                "Reproducir",
-                buildPendingIntent(ACTION_PLAY)
+                android.R.drawable.ic_media_rew,
+                "Repetir",
+                buildPendingIntent(ACTION_REWIND),
             ).build()
-        }
 
-        val prevAction = NotificationCompat.Action.Builder(
-            android.R.drawable.ic_media_previous,
-            "Anterior",
-            buildPendingIntent(ACTION_PREV)
-        ).build()
+        val nextAction =
+            NotificationCompat.Action.Builder(
+                android.R.drawable.ic_media_next,
+                "Siguiente",
+                buildPendingIntent(ACTION_NEXT),
+            ).build()
 
-        val rewindAction = NotificationCompat.Action.Builder(
-            android.R.drawable.ic_media_rew,
-            "Repetir",
-            buildPendingIntent(ACTION_REWIND)
-        ).build()
-
-        val nextAction = NotificationCompat.Action.Builder(
-            android.R.drawable.ic_media_next,
-            "Siguiente",
-            buildPendingIntent(ACTION_NEXT)
-        ).build()
-
-        // CLAVE: Notificación persistente que no se elimina
-        val notification = NotificationCompat.Builder(appContext, CHANNEL_ID)
-            .setContentTitle(currentSubtitle)
-            .setContentText(currentTitle)
-            .setSmallIcon(appContext.applicationInfo.icon)
-            .setLargeIcon(coverBitmap)
-            .setContentIntent(getContentIntent())
-            .setDeleteIntent(buildPendingIntent(ACTION_STOP))
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setOngoing(true)            // Mantiene la notificación viva siempre
-            .setAutoCancel(false)         // Evita que se cierre al tocar fuera
-            .addAction(prevAction)
-            .addAction(rewindAction)
-            .addAction(playPauseAction)
-            .addAction(nextAction)
-            .setStyle(
-                MediaStyle()
-                    .setMediaSession(session.sessionToken)
-                    .setShowActionsInCompactView(1, 2, 3)
+        val notification =
+            NotificationCompat.Builder(
+                appContext,
+                CHANNEL_ID,
             )
-            .build()
+                .setContentTitle(currentSubtitle)
+                .setContentText(currentTitle)
+                .setSmallIcon(appContext.applicationInfo.icon)
+                .setLargeIcon(coverBitmap)
+                .setContentIntent(getContentIntent())
+                .setDeleteIntent(
+                    buildPendingIntent(ACTION_STOP),
+                )
+                .setVisibility(
+                    NotificationCompat.VISIBILITY_PUBLIC,
+                )
+                .setOngoing(true)
+                .setAutoCancel(false)
+                .addAction(prevAction)
+                .addAction(rewindAction)
+                .addAction(playPauseAction)
+                .addAction(nextAction)
+                .setStyle(
+                    MediaStyle()
+                        .setMediaSession(
+                            session.sessionToken,
+                        )
+                        .setShowActionsInCompactView(
+                            1,
+                            2,
+                            3,
+                        ),
+                )
+                .build()
 
-        val manager = appContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        manager.notify(NOTIFICATION_ID, notification)
+        val manager =
+            appContext.getSystemService(
+                Context.NOTIFICATION_SERVICE,
+            ) as NotificationManager
+
+        manager.notify(
+            NOTIFICATION_ID,
+            notification,
+        )
     }
 
     private fun loadCoverBitmap(coverUri: String) {
-        if (coverUri == currentCoverUri && coverBitmap != null) return
+        if (
+            coverUri == currentCoverUri &&
+            coverBitmap != null
+        ) {
+            return
+        }
+
         currentCoverUri = coverUri
 
         if (coverUri.isBlank()) {
@@ -310,22 +428,42 @@ class NativeTTSMediaControl(private val appContext: ReactApplicationContext) :
         }
 
         if (coverUri.startsWith("file://")) {
-            val path = coverUri.removePrefix("file://").split("?")[0]
+            val path =
+                coverUri
+                    .removePrefix("file://")
+                    .split("?")[0]
+
             val file = File(path)
+
             if (file.exists()) {
-                coverBitmap = BitmapFactory.decodeFile(file.absolutePath)
+                coverBitmap =
+                    BitmapFactory.decodeFile(
+                        file.absolutePath,
+                    )
             }
-        } else if (coverUri.startsWith("http")) {
+
+            return
+        }
+
+        if (coverUri.startsWith("http")) {
             coverBitmap = null
+
             Thread {
                 try {
-                    val stream = URL(coverUri).openStream()
-                    val bitmap = BitmapFactory.decodeStream(stream)
+                    val stream =
+                        URL(coverUri).openStream()
+
+                    val bitmap =
+                        BitmapFactory.decodeStream(
+                            stream,
+                        )
+
                     stream.close()
+
                     coverBitmap = bitmap
                     updateNotification()
                 } catch (_: Exception) {
-                    // Silenciar errores de imagen
+                    // No interrumpimos el TTS si falla la portada.
                 }
             }.start()
         }
@@ -335,11 +473,11 @@ class NativeTTSMediaControl(private val appContext: ReactApplicationContext) :
         title: String,
         subtitle: String,
         coverUri: String,
-        isPlaying: Boolean
+        isPlaying: Boolean,
     ) {
         this.isPlaying = isPlaying
-        this.currentTitle = title
-        this.currentSubtitle = subtitle
+        currentTitle = title
+        currentSubtitle = subtitle
 
         ensureChannel()
         ensureMediaSession()
@@ -353,10 +491,45 @@ class NativeTTSMediaControl(private val appContext: ReactApplicationContext) :
         updateNotification()
     }
 
-    override fun updateProgress(current: Double, total: Double) {
+    override fun updateProgress(
+        current: Double,
+        total: Double,
+    ) {
         currentPosition = current.toLong()
         totalDuration = total.toLong()
+
         updateNotification()
+    }
+
+    override fun speakTest(text: String) {
+        val serviceIntent =
+            Intent(
+                appContext,
+                NativeTTSPlaybackService::class.java,
+            ).apply {
+                action =
+                    NativeTTSPlaybackService.ACTION_SPEAK_TEST
+
+                putExtra(
+                    NativeTTSPlaybackService.EXTRA_TEXT,
+                    text,
+                )
+            }
+
+        ContextCompat.startForegroundService(
+            appContext,
+            serviceIntent,
+        )
+    }
+
+    override fun stopNativePlayback() {
+        val serviceIntent =
+            Intent(
+                appContext,
+                NativeTTSPlaybackService::class.java,
+            )
+
+        appContext.stopService(serviceIntent)
     }
 
     override fun dismiss() {
@@ -364,20 +537,32 @@ class NativeTTSMediaControl(private val appContext: ReactApplicationContext) :
         mediaSession?.release()
         mediaSession = null
 
-        val manager = appContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val manager =
+            appContext.getSystemService(
+                Context.NOTIFICATION_SERVICE,
+            ) as NotificationManager
+
         manager.cancel(NOTIFICATION_ID)
 
         if (receiverRegistered) {
             try {
-                appContext.unregisterReceiver(mediaReceiver)
-            } catch (_: Exception) {}
+                appContext.unregisterReceiver(
+                    mediaReceiver,
+                )
+            } catch (_: Exception) {
+                // El receptor ya podía haber sido eliminado.
+            }
+
             receiverRegistered = false
         }
 
         coverBitmap = null
         currentCoverUri = null
+        currentTitle = null
+        currentSubtitle = null
         currentPosition = 0L
         totalDuration = 0L
+        isPlaying = false
     }
 
     override fun addListener(eventName: String?) {
@@ -385,6 +570,10 @@ class NativeTTSMediaControl(private val appContext: ReactApplicationContext) :
     }
 
     override fun removeListeners(count: Double) {
-        listenerCount = (listenerCount - count.toInt()).coerceAtLeast(0)
+        listenerCount =
+            (
+                listenerCount -
+                    count.toInt()
+            ).coerceAtLeast(0)
     }
 }

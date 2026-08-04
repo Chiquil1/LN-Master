@@ -1,23 +1,24 @@
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  View,
+  ScrollView,
   StyleSheet,
   Text,
-  ScrollView,
   TouchableOpacity,
+  View,
 } from 'react-native';
 import { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import Slider from '@react-native-community/slider';
 import { getAvailableVoicesAsync, Voice } from 'expo-speech';
 import { getLocales } from 'expo-localization';
 import {
-  useTheme,
   useChapterGeneralSettings,
   useChapterReaderSettings,
+  useTheme,
 } from '@hooks/persisted';
 import { getString } from '@strings/translations';
-import { List, Button } from '@components/index';
-import { Portal, Modal, Chip } from 'react-native-paper';
+import { Button, List } from '@components/index';
+import { Chip, Modal, Portal } from 'react-native-paper';
+import NativeTTSMediaControl from '@specs/NativeTTSMediaControl';
 import ReaderSheetPreferenceItem from './ReaderSheetPreferenceItem';
 
 interface VoicePickerModalProps {
@@ -37,56 +38,66 @@ const VoicePickerModal: React.FC<VoicePickerModalProps> = ({
 }) => {
   const theme = useTheme();
   const [selectedLanguages, setSelectedLanguages] = useState<string[]>([]);
-  // Get system language safely using getLocales()
+
   const systemLocale = getLocales()[0]?.languageCode || 'en';
 
-  // Get unique languages from voices
   const availableLanguages = useMemo(() => {
     const languages = new Set<string>();
+
     voices.forEach(voice => {
       if (voice.language) {
-        const lang = voice.language.split('-')[0];
-        languages.add(lang);
+        const language = voice.language.split('-')[0];
+        languages.add(language);
       }
     });
-    return Array.from(languages).sort((a, b) => {
-      // System language first
-      if (a === systemLocale) return -1;
-      if (b === systemLocale) return 1;
-      return a.localeCompare(b);
+
+    return Array.from(languages).sort((firstLanguage, secondLanguage) => {
+      if (firstLanguage === systemLocale) {
+        return -1;
+      }
+
+      if (secondLanguage === systemLocale) {
+        return 1;
+      }
+
+      return firstLanguage.localeCompare(secondLanguage);
     });
   }, [voices, systemLocale]);
 
-  // Filter voices by selected languages
   const filteredVoices = useMemo(() => {
     if (selectedLanguages.length === 0) {
-      // Show system language voices by default
       return voices.filter(voice => {
-        if (voice.name === 'System') return true;
-        const lang = voice.language?.split('-')[0];
-        return lang === systemLocale;
+        if (voice.name === 'System') {
+          return true;
+        }
+
+        const language = voice.language?.split('-')[0];
+        return language === systemLocale;
       });
     }
 
     return voices.filter(voice => {
-      if (voice.name === 'System') return true;
-      const lang = voice.language?.split('-')[0];
-      return lang && selectedLanguages.includes(lang);
+      if (voice.name === 'System') {
+        return true;
+      }
+
+      const language = voice.language?.split('-')[0];
+
+      return language && selectedLanguages.includes(language);
     });
   }, [voices, selectedLanguages, systemLocale]);
 
-  const toggleLanguage = (lang: string) => {
-    setSelectedLanguages(prev => {
-      if (prev.includes(lang)) {
-        return prev.filter(l => l !== lang);
-      } else {
-        return [...prev, lang];
+  const toggleLanguage = (language: string) => {
+    setSelectedLanguages(previousLanguages => {
+      if (previousLanguages.includes(language)) {
+        return previousLanguages.filter(item => item !== language);
       }
+
+      return [...previousLanguages, language];
     });
   };
 
   useEffect(() => {
-    // Reset to system language when modal opens
     if (visible) {
       setSelectedLanguages([]);
     }
@@ -99,42 +110,62 @@ const VoicePickerModal: React.FC<VoicePickerModalProps> = ({
         onDismiss={onDismiss}
         contentContainerStyle={[
           styles.modalContent,
-          { backgroundColor: theme.surface },
+          {
+            backgroundColor: theme.surface,
+          },
         ]}
       >
-        <Text style={[styles.modalTitle, { color: theme.onSurface }]}>
+        <Text
+          style={[
+            styles.modalTitle,
+            {
+              color: theme.onSurface,
+            },
+          ]}
+        >
           Select Voice
         </Text>
 
-        {/* Language Filter */}
         <View style={styles.languageFilterContainer}>
-          <Text style={[styles.filterLabel, { color: theme.onSurfaceVariant }]}>
+          <Text
+            style={[
+              styles.filterLabel,
+              {
+                color: theme.onSurfaceVariant,
+              },
+            ]}
+          >
             Filter by language:
           </Text>
+
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
             style={styles.languageChipsScroll}
           >
-            {availableLanguages.map(lang => {
-              const isSelected = selectedLanguages.includes(lang);
-              const isSystemLang = lang === systemLocale;
+            {availableLanguages.map(language => {
+              const isSelected = selectedLanguages.includes(language);
+              const isSystemLanguage = language === systemLocale;
               const showingSystemOnly = selectedLanguages.length === 0;
               const isActive =
-                isSelected || (showingSystemOnly && isSystemLang);
+                isSelected || (showingSystemOnly && isSystemLanguage);
 
               return (
                 <Chip
-                  key={lang}
+                  key={language}
                   selected={isActive}
-                  onPress={() => toggleLanguage(lang)}
+                  onPress={() => toggleLanguage(language)}
                   style={[
                     styles.languageChip,
-                    isActive && { backgroundColor: theme.primary },
+                    isActive && {
+                      backgroundColor: theme.primary,
+                    },
                   ]}
                   textStyle={[
                     styles.languageChipText,
-                    { color: isActive ? theme.onPrimary : theme.onSurface },
+                    {
+                      color: isActive ? theme.onPrimary : theme.onSurface,
+                    },
                   ]}
                 >
                   <Text
@@ -142,8 +173,8 @@ const VoicePickerModal: React.FC<VoicePickerModalProps> = ({
                       color: isActive ? theme.onPrimary : theme.onSurface,
                     }}
                   >
-                    {lang.toUpperCase()}
-                    {isSystemLang ? ' (System)' : ''}
+                    {language.toUpperCase()}
+                    {isSystemLanguage ? ' (System)' : ''}
                   </Text>
                 </Chip>
               );
@@ -151,18 +182,22 @@ const VoicePickerModal: React.FC<VoicePickerModalProps> = ({
           </ScrollView>
         </View>
 
-        {/* Voice List */}
         <ScrollView style={styles.voiceList}>
           {filteredVoices.length === 0 ? (
             <Text
-              style={[styles.noVoicesText, { color: theme.onSurfaceVariant }]}
+              style={[
+                styles.noVoicesText,
+                {
+                  color: theme.onSurfaceVariant,
+                },
+              ]}
             >
               No voices available for selected languages
             </Text>
           ) : (
-            filteredVoices.map((voice: Voice, index: number) => (
+            filteredVoices.map((voice, index) => (
               <TouchableOpacity
-                key={index}
+                key={`${voice.identifier ?? voice.name}-${index}`}
                 style={[
                   styles.voiceItem,
                   currentVoice?.identifier === voice.identifier && {
@@ -176,23 +211,39 @@ const VoicePickerModal: React.FC<VoicePickerModalProps> = ({
               >
                 <View style={styles.voiceItemContent}>
                   <Text
-                    style={[styles.voiceItemText, { color: theme.onSurface }]}
+                    style={[
+                      styles.voiceItemText,
+                      {
+                        color: theme.onSurface,
+                      },
+                    ]}
                   >
                     {voice.name}
                   </Text>
+
                   {voice.language && (
                     <Text
                       style={[
                         styles.voiceItemLanguage,
-                        { color: theme.onSurfaceVariant },
+                        {
+                          color: theme.onSurfaceVariant,
+                        },
                       ]}
                     >
                       {voice.language}
                     </Text>
                   )}
                 </View>
+
                 {currentVoice?.identifier === voice.identifier && (
-                  <Text style={[styles.checkIcon, { color: theme.primary }]}>
+                  <Text
+                    style={[
+                      styles.checkIcon,
+                      {
+                        color: theme.primary,
+                      },
+                    ]}
+                  >
                     ✓
                   </Text>
                 )}
@@ -214,23 +265,39 @@ const VoicePickerModal: React.FC<VoicePickerModalProps> = ({
 
 const TTSTab: React.FC = () => {
   const theme = useTheme();
+
   const { TTSEnable = true, setChapterGeneralSettings } =
     useChapterGeneralSettings();
 
   const { tts, setChapterReaderSettings } = useChapterReaderSettings();
+
   const [voices, setVoices] = useState<Voice[]>([]);
   const [voiceModalVisible, setVoiceModalVisible] = useState(false);
 
   useEffect(() => {
-    getAvailableVoicesAsync().then(res => {
-      res.sort((a, b) => a.name.localeCompare(b.name));
-      setVoices([{ name: 'System', language: 'System' } as Voice, ...res]);
+    getAvailableVoicesAsync().then(availableVoices => {
+      availableVoices.sort((firstVoice, secondVoice) =>
+        firstVoice.name.localeCompare(secondVoice.name),
+      );
+
+      setVoices([
+        {
+          name: 'System',
+          language: 'System',
+        } as Voice,
+        ...availableVoices,
+      ]);
     });
   }, []);
 
   const handleVoiceSelect = useCallback(
     (voice: Voice) => {
-      setChapterReaderSettings({ tts: { ...tts, voice } });
+      setChapterReaderSettings({
+        tts: {
+          ...tts,
+          voice,
+        },
+      });
     },
     [tts, setChapterReaderSettings],
   );
@@ -244,13 +311,23 @@ const TTSTab: React.FC = () => {
       >
         <View style={styles.section}>
           <List.SubHeader theme={theme}>
-            <Text style={{ color: theme.onSurface }}>Text to Speech</Text>
+            <Text
+              style={{
+                color: theme.onSurface,
+              }}
+            >
+              Text to Speech
+            </Text>
           </List.SubHeader>
 
           <ReaderSheetPreferenceItem
             label="Enable TTS"
             value={TTSEnable}
-            onPress={() => setChapterGeneralSettings({ TTSEnable: !TTSEnable })}
+            onPress={() =>
+              setChapterGeneralSettings({
+                TTSEnable: !TTSEnable,
+              })
+            }
             theme={theme}
           />
 
@@ -260,18 +337,41 @@ const TTSTab: React.FC = () => {
                 style={styles.settingItem}
                 onPress={() => setVoiceModalVisible(true)}
               >
-                <Text style={[styles.label, { color: theme.onSurface }]}>
+                <Text
+                  style={[
+                    styles.label,
+                    {
+                      color: theme.onSurface,
+                    },
+                  ]}
+                >
                   Voice
                 </Text>
-                <Text style={[styles.value, { color: theme.onSurfaceVariant }]}>
+
+                <Text
+                  style={[
+                    styles.value,
+                    {
+                      color: theme.onSurfaceVariant,
+                    },
+                  ]}
+                >
                   {tts?.voice?.name || 'System'}
                 </Text>
               </TouchableOpacity>
 
               <View style={styles.sliderSection}>
-                <Text style={[styles.sliderLabel, { color: theme.onSurface }]}>
+                <Text
+                  style={[
+                    styles.sliderLabel,
+                    {
+                      color: theme.onSurface,
+                    },
+                  ]}
+                >
                   Speed: {tts?.rate?.toFixed(1) || '1.0'}x
                 </Text>
+
                 <Slider
                   style={styles.slider}
                   value={tts?.rate || 1}
@@ -282,15 +382,28 @@ const TTSTab: React.FC = () => {
                   maximumTrackTintColor={theme.surfaceVariant}
                   thumbTintColor={theme.primary}
                   onSlidingComplete={value =>
-                    setChapterReaderSettings({ tts: { ...tts, rate: value } })
+                    setChapterReaderSettings({
+                      tts: {
+                        ...tts,
+                        rate: value,
+                      },
+                    })
                   }
                 />
               </View>
 
               <View style={styles.sliderSection}>
-                <Text style={[styles.sliderLabel, { color: theme.onSurface }]}>
+                <Text
+                  style={[
+                    styles.sliderLabel,
+                    {
+                      color: theme.onSurface,
+                    },
+                  ]}
+                >
                   Pitch: {tts?.pitch?.toFixed(1) || '1.0'}
                 </Text>
+
                 <Slider
                   style={styles.slider}
                   value={tts?.pitch || 1}
@@ -301,7 +414,12 @@ const TTSTab: React.FC = () => {
                   maximumTrackTintColor={theme.surfaceVariant}
                   thumbTintColor={theme.primary}
                   onSlidingComplete={value =>
-                    setChapterReaderSettings({ tts: { ...tts, pitch: value } })
+                    setChapterReaderSettings({
+                      tts: {
+                        ...tts,
+                        pitch: value,
+                      },
+                    })
                   }
                 />
               </View>
@@ -325,11 +443,62 @@ const TTSTab: React.FC = () => {
                 value={tts?.scrollToTop !== false}
                 onPress={() =>
                   setChapterReaderSettings({
-                    tts: { ...tts, scrollToTop: !(tts?.scrollToTop !== false) },
+                    tts: {
+                      ...tts,
+                      scrollToTop: !(tts?.scrollToTop !== false),
+                    },
                   })
                 }
                 theme={theme}
               />
+
+              <View style={styles.nativeTTSButtonContainer}>
+                <Text
+                  style={[
+                    styles.nativeTTSSectionTitle,
+                    {
+                      color: theme.onSurface,
+                    },
+                  ]}
+                >
+                  Prueba de reproducción nativa
+                </Text>
+
+                <Text
+                  style={[
+                    styles.nativeTTSDescription,
+                    {
+                      color: theme.onSurfaceVariant,
+                    },
+                  ]}
+                >
+                  Esta prueba utiliza el motor TTS predeterminado de tu
+                  teléfono. La voz debe continuar al salir de la aplicación o
+                  apagar la pantalla.
+                </Text>
+
+                <Button
+                  title="Probar TTS nativo"
+                  mode="outlined"
+                  onPress={() => {
+                    NativeTTSMediaControl.speakTest(
+                      'Esta es una prueba del lector nativo de LNReader. ' +
+                        'La voz debe continuar aunque salgas de la aplicación ' +
+                        'o apagues la pantalla del teléfono.',
+                    );
+                  }}
+                  style={styles.nativeTTSButton}
+                />
+
+                <Button
+                  title="Detener TTS nativo"
+                  mode="outlined"
+                  onPress={() => {
+                    NativeTTSMediaControl.stopNativePlayback();
+                  }}
+                  style={styles.nativeTTSButton}
+                />
+              </View>
 
               <View style={styles.resetButtonContainer}>
                 <Button
@@ -340,7 +509,10 @@ const TTSTab: React.FC = () => {
                       tts: {
                         pitch: 1,
                         rate: 1,
-                        voice: { name: 'System', language: 'System' } as Voice,
+                        voice: {
+                          name: 'System',
+                          language: 'System',
+                        } as Voice,
                         autoPageAdvance: false,
                         scrollToTop: true,
                       },
@@ -403,6 +575,23 @@ const styles = StyleSheet.create({
   slider: {
     height: 40,
   },
+  nativeTTSButtonContainer: {
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  nativeTTSSectionTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    marginBottom: 6,
+  },
+  nativeTTSDescription: {
+    fontSize: 13,
+    lineHeight: 18,
+    marginBottom: 8,
+  },
+  nativeTTSButton: {
+    marginTop: 8,
+  },
   resetButtonContainer: {
     paddingHorizontal: 16,
     paddingVertical: 8,
@@ -438,6 +627,9 @@ const styles = StyleSheet.create({
     marginEnd: 8,
     marginBottom: 8,
   },
+  languageChipText: {
+    fontSize: 12,
+  },
   voiceList: {
     maxHeight: 350,
     marginTop: 8,
@@ -467,9 +659,6 @@ const styles = StyleSheet.create({
   },
   cancelButton: {
     marginTop: 16,
-  },
-  languageChipText: {
-    fontSize: 12,
   },
   checkIcon: {
     fontSize: 16,
