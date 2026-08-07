@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
+
 import { MMKVStorage } from '@utils/mmkv/mmkv';
 
 export interface TTSQueueItem {
@@ -15,13 +16,17 @@ export interface TTSState {
   currentChapterIndex: number;
   isPlaying: boolean;
   isLoadingNext: boolean;
+
   setQueue: (queue: TTSQueueItem[], currentChapterIndex?: number) => void;
   addQueueItem: (item: TTSQueueItem) => void;
   clearQueue: () => void;
+
   setCurrentChapterIndex: (index: number) => void;
   setIsPlaying: (value: boolean) => void;
   setIsLoadingNext: (value: boolean) => void;
+
   updateCurrentItemCurrentIndex: (index: number) => void;
+
   advanceSegment: () => boolean;
   advanceChapter: () => boolean;
 }
@@ -33,96 +38,214 @@ export const useTTSStore = create<TTSState>()(
       currentChapterIndex: 0,
       isPlaying: false,
       isLoadingNext: false,
+
       setQueue: (newQueue: TTSQueueItem[], currentChapterIndex = 0): void => {
-        set({ queue: newQueue, currentChapterIndex });
+        const normalizedChapterIndex =
+          newQueue.length === 0
+            ? 0
+            : Math.min(Math.max(currentChapterIndex, 0), newQueue.length - 1);
+
+        set({
+          queue: newQueue,
+          currentChapterIndex: normalizedChapterIndex,
+        });
       },
+
       addQueueItem: (item: TTSQueueItem): void => {
-        set(state => ({ queue: [...state.queue, item] }));
+        set(state => ({
+          queue: [...state.queue, item],
+        }));
       },
+
       clearQueue: (): void => {
-        set({ queue: [], currentChapterIndex: 0 });
+        set({
+          queue: [],
+          currentChapterIndex: 0,
+          isPlaying: false,
+          isLoadingNext: false,
+        });
       },
+
       setCurrentChapterIndex: (index: number): void => {
-        set({ currentChapterIndex: index });
+        const state = get();
+
+        if (state.queue.length === 0) {
+          set({ currentChapterIndex: 0 });
+          return;
+        }
+
+        const normalizedIndex = Math.min(
+          Math.max(index, 0),
+          state.queue.length - 1,
+        );
+
+        set({
+          currentChapterIndex: normalizedIndex,
+        });
       },
+
       setIsPlaying: (value: boolean): void => {
-        set({ isPlaying: value });
+        set({
+          isPlaying: value,
+        });
       },
+
       setIsLoadingNext: (value: boolean): void => {
-        set({ isLoadingNext: value });
+        set({
+          isLoadingNext: value,
+        });
       },
+
       updateCurrentItemCurrentIndex: (index: number): void => {
         const state = get();
         const currentChapterIndex = state.currentChapterIndex;
+
         if (
+          state.queue.length === 0 ||
           currentChapterIndex < 0 ||
-          currentChapterIndex >= state.queue.length ||
-          state.queue.length === 0
+          currentChapterIndex >= state.queue.length
         ) {
-          // invalid index, no-op
           return;
         }
+
+        const currentItem = state.queue[currentChapterIndex];
+
+        if (!currentItem) {
+          return;
+        }
+
+        const maxIndex = Math.max(currentItem.textSegments.length - 1, 0);
+
+        const normalizedIndex = Math.min(Math.max(index, 0), maxIndex);
+
         const updatedQueue = [...state.queue];
-        const currentItem = updatedQueue[currentChapterIndex];
+
         updatedQueue[currentChapterIndex] = {
           ...currentItem,
-          currentIndex: index,
+          currentIndex: normalizedIndex,
         };
-        set({ queue: updatedQueue });
+
+        set({
+          queue: updatedQueue,
+        });
       },
+
       advanceSegment: (): boolean => {
         const state = get();
         const currentChapterIndex = state.currentChapterIndex;
         const item = state.queue[currentChapterIndex];
+
         if (!item) {
           return false;
         }
-        if (item.currentIndex + 1 < item.textSegments.length) {
-          const updatedQueue = [...state.queue];
-          updatedQueue[currentChapterIndex] = {
-            ...item,
-            currentIndex: item.currentIndex + 1,
-          };
-          set({ queue: updatedQueue });
-          return true;
+
+        const nextSegmentIndex = item.currentIndex + 1;
+
+        if (nextSegmentIndex >= item.textSegments.length) {
+          return false;
         }
-        return false;
+
+        const updatedQueue = [...state.queue];
+
+        updatedQueue[currentChapterIndex] = {
+          ...item,
+          currentIndex: nextSegmentIndex,
+        };
+
+        set({
+          queue: updatedQueue,
+        });
+
+        return true;
       },
+
       advanceChapter: (): boolean => {
         const state = get();
         const nextChapterIndex = state.currentChapterIndex + 1;
-        if (nextChapterIndex < state.queue.length) {
-          set({ currentChapterIndex: nextChapterIndex });
-          return true;
+
+        if (nextChapterIndex >= state.queue.length) {
+          return false;
         }
-        return false;
+
+        set({
+          currentChapterIndex: nextChapterIndex,
+        });
+
+        return true;
       },
     }),
     {
       name: 'useTTSStore',
+
       storage: createJSONStorage(() => ({
         getItem: (name: string) => MMKVStorage.getString(name) ?? null,
-        setItem: (name: string, value: string) => MMKVStorage.set(name, value),
-        removeItem: (name: string) => {
-          // Use typed helper to avoid `any` cast spread across the codebase
-          try {
-            // lazy import to avoid circular imports
 
+        setItem: (name: string, value: string) => {
+          MMKVStorage.set(name, value);
+        },
+
+        removeItem: (name: string) => {
+          try {
             const { deleteMMKVKey } = require('@utils/mmkv/mmkv');
+
             deleteMMKVKey(name);
           } catch {
-            // fallback to best-effort delete
             (
-              MMKVStorage as unknown as { delete?: (k: string) => void }
+              MMKVStorage as unknown as {
+                delete?: (key: string) => void;
+              }
             ).delete?.(name);
           }
         },
       })),
+
+      /*
+       * Solo persistimos datos que realmente pueden recuperarse después
+       * de que Android cierre o reinicie el proceso.
+       *
+       * isPlaying NO debe persistirse porque el motor TextToSpeech real
+       * desaparece cuando el proceso muere.
+       *
+       * isLoadingNext tampoco representa un estado recuperable.
+       */
       partialize: state => ({
         queue: state.queue,
         currentChapterIndex: state.currentChapterIndex,
-        isPlaying: state.isPlaying,
       }),
+
+      /*
+       * Versiones anteriores de LN-Master podían tener isPlaying=true
+       * guardado dentro de MMKV.
+       *
+       * Aunque ya no lo persistamos, una instalación existente podría
+       * hidratar ese valor antiguo. Por eso reconstruimos explícitamente
+       * el estado recuperable y forzamos los estados temporales a false.
+       */
+      merge: (persistedState, currentState) => {
+        const persisted = persistedState as Partial<TTSState>;
+
+        const queue = Array.isArray(persisted.queue) ? persisted.queue : [];
+
+        const storedChapterIndex =
+          typeof persisted.currentChapterIndex === 'number'
+            ? persisted.currentChapterIndex
+            : 0;
+
+        const currentChapterIndex =
+          queue.length === 0
+            ? 0
+            : Math.min(Math.max(storedChapterIndex, 0), queue.length - 1);
+
+        return {
+          ...currentState,
+          queue,
+          currentChapterIndex,
+
+          // Nunca restaurar estados físicos/transitorios.
+          isPlaying: false,
+          isLoadingNext: false,
+        };
+      },
     },
   ),
 );
