@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
+import android.speech.tts.TextToSpeech
 import androidx.core.content.ContextCompat
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.ReactApplicationContext
@@ -58,6 +59,32 @@ class NativeTTSMediaControl(
                     "message",
                     intent.getStringExtra(
                         NativeTTSPlaybackService.EXTRA_MESSAGE,
+                    ),
+                )
+            }
+            if (intent.hasExtra(NativeTTSPlaybackService.EXTRA_ERROR_CODE)) {
+                params.putInt(
+                    "code",
+                    intent.getIntExtra(
+                        NativeTTSPlaybackService.EXTRA_ERROR_CODE,
+                        TextToSpeech.ERROR,
+                    ),
+                )
+            }
+            if (intent.hasExtra(NativeTTSPlaybackService.EXTRA_ERROR_KIND)) {
+                params.putString(
+                    "kind",
+                    intent.getStringExtra(
+                        NativeTTSPlaybackService.EXTRA_ERROR_KIND,
+                    ),
+                )
+            }
+            if (intent.hasExtra(NativeTTSPlaybackService.EXTRA_REQUIRES_NETWORK)) {
+                params.putBoolean(
+                    "requiresNetwork",
+                    intent.getBooleanExtra(
+                        NativeTTSPlaybackService.EXTRA_REQUIRES_NETWORK,
+                        false,
                     ),
                 )
             }

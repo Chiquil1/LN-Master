@@ -65,6 +65,9 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
         const val EXTRA_RATE = "rate"
         const val EXTRA_PITCH = "pitch"
         const val EXTRA_IS_TEST = "isTest"
+        const val EXTRA_ERROR_CODE = "errorCode"
+        const val EXTRA_ERROR_KIND = "errorKind"
+        const val EXTRA_REQUIRES_NETWORK = "requiresNetwork"
 
         private const val CHANNEL_ID = "tts-media-controls"
         private const val NOTIFICATION_ID = 1001
@@ -89,6 +92,7 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
     private var utteranceSequence = 0L
     private var pendingRequest: PlaybackRequest? = null
     private var isTestPlayback = false
+    private var activeVoiceRequiresNetwork = false
 
     private data class PlaybackRequest(
         val segments: List<String>,
@@ -147,7 +151,12 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
 
     override fun onInit(status: Int) {
         if (status != TextToSpeech.SUCCESS) {
-            emitEvent("TTSNativeError", message = "No se pudo iniciar el motor TTS")
+            emitEvent(
+                "TTSNativeError",
+                message = "No se pudo iniciar el motor TTS",
+                errorCode = TextToSpeech.ERROR_SERVICE,
+                errorKind = "service",
+            )
             stopPlayback(stopService = true)
             return
         }
@@ -187,14 +196,14 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
 
                 @Deprecated("Deprecated in Java")
                 override fun onError(utteranceId: String?) {
-                    handleUtteranceError(utteranceId)
+                    handleUtteranceError(utteranceId, TextToSpeech.ERROR)
                 }
 
                 override fun onError(
                     utteranceId: String?,
                     errorCode: Int,
                 ) {
-                    handleUtteranceError(utteranceId)
+                    handleUtteranceError(utteranceId, errorCode)
                 }
             },
         )
@@ -284,6 +293,8 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
                 }
                 ?.let { voice -> tts.voice = voice }
         }
+
+        activeVoiceRequiresNetwork = tts.voice?.isNetworkConnectionRequired == true
     }
 
     private fun speakCurrentSegment() {
@@ -312,27 +323,70 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
         ) ?: TextToSpeech.ERROR
 
         if (result == TextToSpeech.ERROR) {
-            handleUtteranceError(utteranceId)
+            handleUtteranceError(utteranceId, TextToSpeech.ERROR)
             return
         }
 
         updateNotification()
     }
 
-    private fun handleUtteranceError(utteranceId: String?) {
+    private fun handleUtteranceError(
+        utteranceId: String?,
+        errorCode: Int,
+    ) {
         mainHandler.post {
             if (utteranceId != activeUtteranceId) {
                 return@post
             }
 
+            activeUtteranceId = null
+            isPlaying = false
+            isPaused = true
+            textToSpeech?.stop()
+            updateNotification()
+
             emitEvent(
                 "TTSNativeError",
                 position = currentIndex,
-                message = "El motor TTS no pudo leer un fragmento",
+                message = ttsErrorMessage(errorCode),
+                errorCode = errorCode,
+                errorKind = ttsErrorKind(errorCode),
+                requiresNetwork = activeVoiceRequiresNetwork,
             )
-            advancePlayback()
         }
     }
+
+    private fun ttsErrorKind(errorCode: Int): String =
+        when (errorCode) {
+            TextToSpeech.ERROR_NETWORK -> "network"
+            TextToSpeech.ERROR_NETWORK_TIMEOUT -> "network_timeout"
+            TextToSpeech.ERROR_NOT_INSTALLED_YET -> "voice_not_installed"
+            TextToSpeech.ERROR_SERVICE -> "service"
+            TextToSpeech.ERROR_SYNTHESIS -> "synthesis"
+            TextToSpeech.ERROR_OUTPUT -> "output"
+            TextToSpeech.ERROR_INVALID_REQUEST -> "invalid_request"
+            else -> "generic"
+        }
+
+    private fun ttsErrorMessage(errorCode: Int): String =
+        when (errorCode) {
+            TextToSpeech.ERROR_NETWORK ->
+                "El motor TTS perdió la conexión de red"
+            TextToSpeech.ERROR_NETWORK_TIMEOUT ->
+                "El motor TTS agotó el tiempo de espera de red"
+            TextToSpeech.ERROR_NOT_INSTALLED_YET ->
+                "La voz TTS todavía no está instalada completamente"
+            TextToSpeech.ERROR_SERVICE ->
+                "El servicio TTS de Android produjo un error"
+            TextToSpeech.ERROR_SYNTHESIS ->
+                "El motor TTS no pudo sintetizar el fragmento"
+            TextToSpeech.ERROR_OUTPUT ->
+                "El motor TTS no pudo reproducir el audio generado"
+            TextToSpeech.ERROR_INVALID_REQUEST ->
+                "El motor TTS rechazó la solicitud de lectura"
+            else ->
+                "El motor TTS no pudo leer el fragmento"
+        }
 
     private fun advancePlayback() {
         activeUtteranceId = null
@@ -426,6 +480,7 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
         isPlaying = false
         isPaused = false
         isTestPlayback = false
+        activeVoiceRequiresNetwork = false
         textToSpeech?.stop()
 
         if (stopService) {
@@ -674,11 +729,17 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
         eventName: String,
         position: Int? = null,
         message: String? = null,
+        errorCode: Int? = null,
+        errorKind: String? = null,
+        requiresNetwork: Boolean? = null,
     ) {
         val intent = Intent(EVENT_ACTION).setPackage(packageName).apply {
             putExtra(EXTRA_EVENT_NAME, eventName)
             position?.let { putExtra(EXTRA_POSITION, it) }
             message?.let { putExtra(EXTRA_MESSAGE, it) }
+            errorCode?.let { putExtra(EXTRA_ERROR_CODE, it) }
+            errorKind?.let { putExtra(EXTRA_ERROR_KIND, it) }
+            requiresNetwork?.let { putExtra(EXTRA_REQUIRES_NETWORK, it) }
         }
 
         sendBroadcast(intent)
