@@ -64,6 +64,24 @@ type NativeTTSPlaybackRequest = {
   sessionId: number;
 };
 
+type NativeTTSErrorKind =
+  | 'network'
+  | 'network_timeout'
+  | 'voice_not_installed'
+  | 'service'
+  | 'synthesis'
+  | 'output'
+  | 'invalid_request'
+  | 'generic';
+
+type NativeTTSErrorEvent = {
+  position?: number;
+  message?: string;
+  code?: number;
+  kind?: NativeTTSErrorKind;
+  requiresNetwork?: boolean;
+};
+
 const TTS_RETRY_DELAY_MS = 750;
 const TTS_MAX_RETRIES = 1;
 
@@ -490,13 +508,28 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
 
     const nativeErrorListener = ttsMediaEmitter.addListener(
       'TTSNativeError',
-      (event: { message?: string; code?: number }) => {
+      (event: NativeTTSErrorEvent) => {
         const playback = lastTTSPlaybackRef.current;
         const currentSession = speechSessionRef.current;
+        const errorKind = event.kind ?? 'generic';
+
+        const isNetworkError =
+          errorKind === 'network' || errorKind === 'network_timeout';
+
+        if (
+          typeof event.position === 'number' &&
+          event.position >= 0 &&
+          event.position < ttsSegmentsRef.current.length
+        ) {
+          ttsIndexRef.current = event.position;
+          updateCurrentItemCurrentIndex(event.position);
+        }
 
         console.warn('[TTS] Error del motor nativo:', {
           message: event.message,
           code: event.code,
+          kind: errorKind,
+          requiresNetwork: event.requiresNetwork,
           index: ttsIndexRef.current,
           retry: ttsRetryCountRef.current,
           fallbackVoice: ttsFallbackVoiceRef.current,
@@ -536,26 +569,38 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
           );
         };
 
-        // Primer fallo: repetimos exactamente el mismo segmento/cola.
-        if (ttsRetryCountRef.current < TTS_MAX_RETRIES) {
-          ttsRetryCountRef.current += 1;
+        const pauseAtCurrentPosition = () => {
           NativeTTSMediaControl.stopNativePlayback();
+
           nativePlaybackStartedRef.current = false;
+          nativePlaybackPausedRef.current = true;
           isSpeakingRef.current = false;
+          isTTSReadingRef.current = false;
 
-          ttsRetryTimerRef.current = setTimeout(() => {
-            ttsRetryTimerRef.current = null;
-            restartPlayback(ttsFallbackVoiceRef.current);
-          }, TTS_RETRY_DELAY_MS);
-          return;
-        }
+          setTTSIsPlaying(false);
+          updateTTSPlaybackState(false);
 
-        // Si la voz seleccionada depende de red o dejó de responder,
-        // reiniciamos desde el mismo índice usando la voz del sistema.
-        if (!ttsFallbackVoiceRef.current && playback.voiceIdentifier) {
+          updateTTSNotification({
+            novelName: novel?.name || 'Unknown',
+            chapterName: chapter.name,
+            coverUri: novel?.cover || '',
+            isPlaying: false,
+          });
+
+          webViewRef.current?.injectJavaScript(`
+            if (window.tts && tts.reading) {
+              tts.pause();
+            }
+            true;
+          `);
+        };
+
+        const fallbackToSystemVoice = () => {
           ttsFallbackVoiceRef.current = true;
           ttsRetryCountRef.current = 0;
+
           NativeTTSMediaControl.stopNativePlayback();
+
           nativePlaybackStartedRef.current = false;
           isSpeakingRef.current = false;
 
@@ -567,30 +612,60 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
             ttsRetryTimerRef.current = null;
             restartPlayback(true);
           }, TTS_RETRY_DELAY_MS);
+        };
+
+        if (errorKind === 'invalid_request') {
+          pauseAtCurrentPosition();
           return;
         }
 
-        // Si también falla la voz del sistema, conservamos la posición y
-        // pausamos. Nunca avanzamos silenciosamente al siguiente segmento.
-        NativeTTSMediaControl.stopNativePlayback();
-        nativePlaybackStartedRef.current = false;
-        nativePlaybackPausedRef.current = true;
-        isSpeakingRef.current = false;
-        isTTSReadingRef.current = false;
-        setTTSIsPlaying(false);
-        updateTTSPlaybackState(false);
+        if (errorKind === 'voice_not_installed') {
+          if (!ttsFallbackVoiceRef.current && playback.voiceIdentifier) {
+            fallbackToSystemVoice();
+          } else {
+            pauseAtCurrentPosition();
+          }
 
-        updateTTSNotification({
-          novelName: novel?.name || 'Unknown',
-          chapterName: chapter.name,
-          coverUri: novel?.cover || '',
-          isPlaying: false,
-        });
+          return;
+        }
 
-        webViewRef.current?.injectJavaScript(`
-          if (window.tts && tts.reading) { tts.pause(); }
-          true;
-        `);
+        if (
+          isNetworkError &&
+          event.requiresNetwork === true &&
+          !ttsFallbackVoiceRef.current &&
+          playback.voiceIdentifier
+        ) {
+          fallbackToSystemVoice();
+          return;
+        }
+
+        if (ttsRetryCountRef.current < TTS_MAX_RETRIES) {
+          ttsRetryCountRef.current += 1;
+
+          NativeTTSMediaControl.stopNativePlayback();
+
+          nativePlaybackStartedRef.current = false;
+          isSpeakingRef.current = false;
+
+          ttsRetryTimerRef.current = setTimeout(() => {
+            ttsRetryTimerRef.current = null;
+            restartPlayback(ttsFallbackVoiceRef.current);
+          }, TTS_RETRY_DELAY_MS);
+
+          return;
+        }
+
+        if (errorKind === 'service' || errorKind === 'output') {
+          pauseAtCurrentPosition();
+          return;
+        }
+
+        if (!ttsFallbackVoiceRef.current && playback.voiceIdentifier) {
+          fallbackToSystemVoice();
+          return;
+        }
+
+        pauseAtCurrentPosition();
       },
     );
 
