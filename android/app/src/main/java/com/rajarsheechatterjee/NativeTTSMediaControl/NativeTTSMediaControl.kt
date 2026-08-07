@@ -5,6 +5,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.speech.tts.TextToSpeech
 import androidx.core.content.ContextCompat
 import com.facebook.react.bridge.Arguments
@@ -24,9 +26,16 @@ class NativeTTSMediaControl(
     private val appContext: ReactApplicationContext,
 ) : NativeTTSMediaControlSpec(appContext) {
 
+    companion object {
+        private const val EVENT_VOICE_METADATA = "TTSVoiceMetadata"
+    }
+
     private var listenerCount = 0
     private var receiverRegistered = false
     private var serviceActive = false
+    private var voiceMetadataLoading = false
+    private var voiceMetadataTts: TextToSpeech? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private val serviceEventReceiver = object : BroadcastReceiver() {
         override fun onReceive(
@@ -144,6 +153,123 @@ class NativeTTSMediaControl(
         } catch (_: Exception) {
             // JavaScript may not be available while React Native is restarting.
         }
+    }
+
+    private fun requestVoiceMetadata() {
+        if (voiceMetadataLoading) {
+            return
+        }
+
+        shutdownVoiceMetadataEngine()
+        voiceMetadataLoading = true
+
+        try {
+            voiceMetadataTts =
+                TextToSpeech(appContext) { status ->
+                    mainHandler.post {
+                        emitVoiceMetadata(status)
+                    }
+                }
+        } catch (_: Exception) {
+            voiceMetadataLoading = false
+            sendVoiceMetadataUnavailable(
+                "No se pudo iniciar el motor TTS para consultar las voces",
+            )
+        }
+    }
+
+    private fun emitVoiceMetadata(status: Int) {
+        if (!voiceMetadataLoading) {
+            return
+        }
+
+        val tts = voiceMetadataTts
+
+        if (status != TextToSpeech.SUCCESS || tts == null) {
+            sendVoiceMetadataUnavailable(
+                "Android no pudo cargar la información de las voces TTS",
+            )
+            shutdownVoiceMetadataEngine()
+            return
+        }
+
+        try {
+            val params = Arguments.createMap()
+            val voicesArray = Arguments.createArray()
+            val voices =
+                tts.voices
+                    .orEmpty()
+                    .sortedWith(
+                        compareBy(
+                            { it.isNetworkConnectionRequired },
+                            { it.locale.toLanguageTag() },
+                            { it.name },
+                        ),
+                    )
+
+            voices.forEach { voice ->
+                voicesArray.pushMap(
+                    Arguments.createMap().apply {
+                        putString("identifier", voice.name)
+                        putString("name", voice.name)
+                        putString("language", voice.locale.toLanguageTag())
+                        putBoolean(
+                            "requiresNetwork",
+                            voice.isNetworkConnectionRequired,
+                        )
+                        putInt("quality", voice.quality)
+                        putInt("latency", voice.latency)
+                    },
+                )
+            }
+
+            params.putBoolean("available", true)
+            params.putArray("voices", voicesArray)
+
+            tts.voice?.let { defaultVoice ->
+                params.putString(
+                    "defaultVoiceIdentifier",
+                    defaultVoice.name,
+                )
+                params.putString(
+                    "defaultLanguage",
+                    defaultVoice.locale.toLanguageTag(),
+                )
+                params.putBoolean(
+                    "defaultRequiresNetwork",
+                    defaultVoice.isNetworkConnectionRequired,
+                )
+            }
+
+            sendEvent(EVENT_VOICE_METADATA, params)
+        } catch (_: Exception) {
+            sendVoiceMetadataUnavailable(
+                "No se pudo leer la información de las voces TTS",
+            )
+        } finally {
+            shutdownVoiceMetadataEngine()
+        }
+    }
+
+    private fun sendVoiceMetadataUnavailable(message: String) {
+        sendEvent(
+            EVENT_VOICE_METADATA,
+            Arguments.createMap().apply {
+                putBoolean("available", false)
+                putString("message", message)
+            },
+        )
+    }
+
+    private fun shutdownVoiceMetadataEngine() {
+        try {
+            voiceMetadataTts?.shutdown()
+        } catch (_: Exception) {
+            // The temporary metadata engine may already be shutting down.
+        }
+
+        voiceMetadataTts = null
+        voiceMetadataLoading = false
     }
 
     private fun foregroundIntent(action: String): Intent =
@@ -310,6 +436,10 @@ class NativeTTSMediaControl(
     override fun addListener(eventName: String?) {
         listenerCount++
         registerEventReceiver()
+
+        if (eventName == EVENT_VOICE_METADATA) {
+            requestVoiceMetadata()
+        }
     }
 
     override fun removeListeners(count: Double) {
@@ -317,11 +447,14 @@ class NativeTTSMediaControl(
 
         if (listenerCount == 0) {
             unregisterEventReceiver()
+            shutdownVoiceMetadataEngine()
         }
     }
 
     override fun invalidate() {
         unregisterEventReceiver()
+        shutdownVoiceMetadataEngine()
+        mainHandler.removeCallbacksAndMessages(null)
         super.invalidate()
     }
 }

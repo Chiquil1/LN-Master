@@ -19,15 +19,72 @@ import { getString } from '@strings/translations';
 import { Button, List } from '@components/index';
 import { Chip, Modal, Portal } from 'react-native-paper';
 import NativeTTSMediaControl from '@specs/NativeTTSMediaControl';
+import { ttsMediaEmitter } from '@utils/ttsNotification';
 import ReaderSheetPreferenceItem from './ReaderSheetPreferenceItem';
+
+type NativeVoiceMetadata = {
+  identifier: string;
+  name?: string;
+  language?: string;
+  requiresNetwork: boolean;
+  quality?: number;
+  latency?: number;
+};
+
+type NativeVoiceMetadataEvent = {
+  available?: boolean;
+  defaultVoiceIdentifier?: string;
+  defaultLanguage?: string;
+  defaultRequiresNetwork?: boolean;
+  voices?: NativeVoiceMetadata[];
+  message?: string;
+};
+
+type VoiceWithMetadata = Voice & {
+  requiresNetwork?: boolean;
+  isSystemVoice?: boolean;
+};
 
 interface VoicePickerModalProps {
   visible: boolean;
   onDismiss: () => void;
-  voices: Voice[];
-  onSelect: (voice: Voice) => void;
+  voices: VoiceWithMetadata[];
+  onSelect: (voice: VoiceWithMetadata) => void;
   currentVoice?: Voice;
 }
+
+const isSystemVoice = (voice?: Voice | VoiceWithMetadata) =>
+  voice?.name === 'System' || !voice?.identifier;
+
+const isSameVoice = (
+  firstVoice?: Voice | VoiceWithMetadata,
+  secondVoice?: Voice | VoiceWithMetadata,
+) => {
+  if (!firstVoice || !secondVoice) {
+    return false;
+  }
+
+  if (isSystemVoice(firstVoice) && isSystemVoice(secondVoice)) {
+    return true;
+  }
+
+  return (
+    Boolean(firstVoice.identifier) &&
+    firstVoice.identifier === secondVoice.identifier
+  );
+};
+
+const getNetworkLabel = (voice?: VoiceWithMetadata) => {
+  if (voice?.requiresNetwork === false) {
+    return '✓ Offline';
+  }
+
+  if (voice?.requiresNetwork === true) {
+    return '☁ Requiere Internet';
+  }
+
+  return '? Estado de red desconocido';
+};
 
 const VoicePickerModal: React.FC<VoicePickerModalProps> = ({
   visible,
@@ -38,6 +95,7 @@ const VoicePickerModal: React.FC<VoicePickerModalProps> = ({
 }) => {
   const theme = useTheme();
   const [selectedLanguages, setSelectedLanguages] = useState<string[]>([]);
+  const [offlineOnly, setOfflineOnly] = useState(false);
 
   const systemLocale = getLocales()[0]?.languageCode || 'en';
 
@@ -45,6 +103,10 @@ const VoicePickerModal: React.FC<VoicePickerModalProps> = ({
     const languages = new Set<string>();
 
     voices.forEach(voice => {
+      if (voice.isSystemVoice || voice.name === 'System') {
+        return;
+      }
+
       if (voice.language) {
         const language = voice.language.split('-')[0];
         languages.add(language);
@@ -65,27 +127,23 @@ const VoicePickerModal: React.FC<VoicePickerModalProps> = ({
   }, [voices, systemLocale]);
 
   const filteredVoices = useMemo(() => {
-    if (selectedLanguages.length === 0) {
-      return voices.filter(voice => {
-        if (voice.name === 'System') {
-          return true;
-        }
-
-        const language = voice.language?.split('-')[0];
-        return language === systemLocale;
-      });
-    }
-
     return voices.filter(voice => {
-      if (voice.name === 'System') {
-        return true;
-      }
+      const systemVoice = voice.isSystemVoice || voice.name === 'System';
 
-      const language = voice.language?.split('-')[0];
+      const matchesLanguage =
+        systemVoice ||
+        (selectedLanguages.length === 0
+          ? voice.language?.split('-')[0] === systemLocale
+          : Boolean(
+              voice.language &&
+                selectedLanguages.includes(voice.language.split('-')[0]),
+            ));
 
-      return language && selectedLanguages.includes(language);
+      const matchesNetwork = !offlineOnly || voice.requiresNetwork === false;
+
+      return matchesLanguage && matchesNetwork;
     });
-  }, [voices, selectedLanguages, systemLocale]);
+  }, [voices, selectedLanguages, offlineOnly, systemLocale]);
 
   const toggleLanguage = (language: string) => {
     setSelectedLanguages(previousLanguages => {
@@ -100,6 +158,7 @@ const VoicePickerModal: React.FC<VoicePickerModalProps> = ({
   useEffect(() => {
     if (visible) {
       setSelectedLanguages([]);
+      setOfflineOnly(false);
     }
   }, [visible]);
 
@@ -143,6 +202,25 @@ const VoicePickerModal: React.FC<VoicePickerModalProps> = ({
             showsHorizontalScrollIndicator={false}
             style={styles.languageChipsScroll}
           >
+            <Chip
+              selected={offlineOnly}
+              onPress={() => setOfflineOnly(previousValue => !previousValue)}
+              style={[
+                styles.languageChip,
+                offlineOnly && {
+                  backgroundColor: theme.primary,
+                },
+              ]}
+              textStyle={[
+                styles.languageChipText,
+                {
+                  color: offlineOnly ? theme.onPrimary : theme.onSurface,
+                },
+              ]}
+            >
+              Solo offline
+            </Chip>
+
             {availableLanguages.map(language => {
               const isSelected = selectedLanguages.includes(language);
               const isSystemLanguage = language === systemLocale;
@@ -192,7 +270,9 @@ const VoicePickerModal: React.FC<VoicePickerModalProps> = ({
                 },
               ]}
             >
-              No voices available for selected languages
+              {offlineOnly
+                ? 'No hay voces offline disponibles para este idioma'
+                : 'No voices available for selected languages'}
             </Text>
           ) : (
             filteredVoices.map((voice, index) => (
@@ -200,7 +280,7 @@ const VoicePickerModal: React.FC<VoicePickerModalProps> = ({
                 key={`${voice.identifier ?? voice.name}-${index}`}
                 style={[
                   styles.voiceItem,
-                  currentVoice?.identifier === voice.identifier && {
+                  isSameVoice(currentVoice, voice) && {
                     backgroundColor: theme.surfaceVariant,
                   },
                 ]}
@@ -221,21 +301,35 @@ const VoicePickerModal: React.FC<VoicePickerModalProps> = ({
                     {voice.name}
                   </Text>
 
-                  {voice.language && (
-                    <Text
-                      style={[
-                        styles.voiceItemLanguage,
-                        {
-                          color: theme.onSurfaceVariant,
-                        },
-                      ]}
-                    >
-                      {voice.language}
-                    </Text>
-                  )}
+                  <Text
+                    style={[
+                      styles.voiceItemLanguage,
+                      {
+                        color: theme.onSurfaceVariant,
+                      },
+                    ]}
+                  >
+                    {voice.isSystemVoice
+                      ? 'Voz predeterminada de Android'
+                      : voice.language || 'Idioma desconocido'}
+                  </Text>
+
+                  <Text
+                    style={[
+                      styles.voiceNetworkStatus,
+                      {
+                        color:
+                          voice.requiresNetwork === false
+                            ? theme.primary
+                            : theme.onSurfaceVariant,
+                      },
+                    ]}
+                  >
+                    {getNetworkLabel(voice)}
+                  </Text>
                 </View>
 
-                {currentVoice?.identifier === voice.identifier && (
+                {isSameVoice(currentVoice, voice) && (
                   <Text
                     style={[
                       styles.checkIcon,
@@ -271,36 +365,127 @@ const TTSTab: React.FC = () => {
 
   const { tts, setChapterReaderSettings } = useChapterReaderSettings();
 
-  const [voices, setVoices] = useState<Voice[]>([]);
+  const [voices, setVoices] = useState<VoiceWithMetadata[]>([]);
   const [voiceModalVisible, setVoiceModalVisible] = useState(false);
 
   useEffect(() => {
-    getAvailableVoicesAsync().then(availableVoices => {
-      availableVoices.sort((firstVoice, secondVoice) =>
-        firstVoice.name.localeCompare(secondVoice.name),
-      );
+    let mounted = true;
+    let availableVoices: Voice[] = [];
+    let nativeMetadata: NativeVoiceMetadataEvent | undefined;
 
-      setVoices([
-        {
-          name: 'System',
-          language: 'System',
-        } as Voice,
-        ...availableVoices,
-      ]);
-    });
+    const mergeVoiceData = () => {
+      if (!mounted) {
+        return;
+      }
+
+      const metadataByIdentifier = new Map<string, NativeVoiceMetadata>();
+
+      nativeMetadata?.voices?.forEach(metadata => {
+        if (metadata.identifier) {
+          metadataByIdentifier.set(metadata.identifier, metadata);
+        }
+
+        if (metadata.name) {
+          metadataByIdentifier.set(metadata.name, metadata);
+        }
+      });
+
+      const enrichedVoices: VoiceWithMetadata[] = availableVoices.map(voice => {
+        const metadata =
+          metadataByIdentifier.get(voice.identifier || '') ||
+          metadataByIdentifier.get(voice.name);
+
+        return {
+          ...voice,
+          requiresNetwork: metadata?.requiresNetwork,
+          isSystemVoice: false,
+        };
+      });
+
+      enrichedVoices.sort((firstVoice, secondVoice) => {
+        const getNetworkRank = (voice: VoiceWithMetadata) => {
+          if (voice.requiresNetwork === false) {
+            return 0;
+          }
+
+          if (voice.requiresNetwork === true) {
+            return 1;
+          }
+
+          return 2;
+        };
+
+        const networkDifference =
+          getNetworkRank(firstVoice) - getNetworkRank(secondVoice);
+
+        if (networkDifference !== 0) {
+          return networkDifference;
+        }
+
+        return firstVoice.name.localeCompare(secondVoice.name);
+      });
+
+      const systemVoice = {
+        name: 'System',
+        language: nativeMetadata?.defaultLanguage || 'System',
+        requiresNetwork:
+          typeof nativeMetadata?.defaultRequiresNetwork === 'boolean'
+            ? nativeMetadata.defaultRequiresNetwork
+            : undefined,
+        isSystemVoice: true,
+      } as VoiceWithMetadata;
+
+      setVoices([systemVoice, ...enrichedVoices]);
+    };
+
+    const metadataSubscription = ttsMediaEmitter.addListener(
+      'TTSVoiceMetadata',
+      (event: NativeVoiceMetadataEvent) => {
+        nativeMetadata = event;
+        mergeVoiceData();
+      },
+    );
+
+    getAvailableVoicesAsync()
+      .then(result => {
+        availableVoices = result;
+        mergeVoiceData();
+      })
+      .catch(() => {
+        availableVoices = [];
+        mergeVoiceData();
+      });
+
+    return () => {
+      mounted = false;
+      metadataSubscription.remove();
+    };
   }, []);
 
   const handleVoiceSelect = useCallback(
-    (voice: Voice) => {
+    (voice: VoiceWithMetadata) => {
+      const voiceToPersist = { ...voice };
+      delete voiceToPersist.requiresNetwork;
+      delete voiceToPersist.isSystemVoice;
+
       setChapterReaderSettings({
         tts: {
           ...tts,
-          voice,
+          voice: voiceToPersist as Voice,
         },
       });
     },
     [tts, setChapterReaderSettings],
   );
+
+  const currentVoiceWithMetadata = useMemo(() => {
+    const configuredVoice = tts?.voice;
+
+    return (
+      voices.find(voice => isSameVoice(configuredVoice, voice)) ||
+      voices.find(voice => voice.isSystemVoice)
+    );
+  }, [tts?.voice, voices]);
 
   return (
     <>
@@ -348,16 +533,31 @@ const TTSTab: React.FC = () => {
                   Voice
                 </Text>
 
-                <Text
-                  style={[
-                    styles.value,
-                    {
-                      color: theme.onSurfaceVariant,
-                    },
-                  ]}
-                >
-                  {tts?.voice?.name || 'System'}
-                </Text>
+                <View style={styles.valueContainer}>
+                  <Text
+                    style={[
+                      styles.value,
+                      {
+                        color: theme.onSurfaceVariant,
+                      },
+                    ]}
+                  >
+                    {tts?.voice?.name || 'System'}
+                  </Text>
+                  <Text
+                    style={[
+                      styles.valueStatus,
+                      {
+                        color:
+                          currentVoiceWithMetadata?.requiresNetwork === false
+                            ? theme.primary
+                            : theme.onSurfaceVariant,
+                      },
+                    ]}
+                  >
+                    {getNetworkLabel(currentVoiceWithMetadata)}
+                  </Text>
+                </View>
               </TouchableOpacity>
 
               <View style={styles.sliderSection}>
@@ -563,6 +763,17 @@ const styles = StyleSheet.create({
   },
   value: {
     fontSize: 14,
+    textAlign: 'right',
+  },
+  valueContainer: {
+    alignItems: 'flex-end',
+    flexShrink: 1,
+    marginStart: 12,
+  },
+  valueStatus: {
+    fontSize: 11,
+    marginTop: 3,
+    textAlign: 'right',
   },
   sliderSection: {
     paddingHorizontal: 16,
@@ -651,6 +862,10 @@ const styles = StyleSheet.create({
   },
   voiceItemLanguage: {
     fontSize: 12,
+  },
+  voiceNetworkStatus: {
+    fontSize: 12,
+    marginTop: 3,
   },
   noVoicesText: {
     textAlign: 'center',
