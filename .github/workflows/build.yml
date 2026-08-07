@@ -4,9 +4,11 @@ on:
   push:
     branches:
       - main
+
   pull_request:
     branches:
       - main
+
   workflow_dispatch:
 
 permissions:
@@ -31,6 +33,7 @@ jobs:
         with:
           version: 10.27.0
           cache: true
+          cache_dependency_path: pnpm-lock.yaml
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -43,6 +46,9 @@ jobs:
       - name: Generate test environment
         run: pnpm generate:env:debug
 
+      - name: Check Expo dependency compatibility
+        run: pnpm exec expo install --check
+
       - name: Check TypeScript
         run: pnpm type-check
 
@@ -53,10 +59,10 @@ jobs:
         run: pnpm format:check
 
       - name: Run database tests
-        run: pnpm exec jest --selectProjects db --runInBand
+        run: pnpm exec jest --selectProjects db --ci --runInBand
 
       - name: Run React Native tests
-        run: pnpm exec jest --selectProjects rn --runInBand
+        run: pnpm exec jest --selectProjects rn --ci --runInBand
 
   build-android:
     name: Build Android prerelease
@@ -79,6 +85,7 @@ jobs:
         with:
           version: 10.27.0
           cache: true
+          cache_dependency_path: pnpm-lock.yaml
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -96,7 +103,7 @@ jobs:
           --anilist-client-id "${{ vars.ANILIST_CLIENT_ID }}"
 
       - name: Build Android prerelease
-        uses: callstackincubator/android@v3
+        uses: callstackincubator/android@v3.1.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO_OWNER: ${{ github.repository_owner }}
@@ -106,3 +113,4 @@ jobs:
           variant: preRelease
           re-sign: true
           validate-elf-alignment: true
+```

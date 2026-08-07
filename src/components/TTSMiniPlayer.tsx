@@ -1,10 +1,9 @@
 import React, { useCallback } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
+
 import { useTheme } from '@hooks/persisted';
 import { useTTSStore } from '@hooks/useTTSStore';
 import {
-  pauseAudio,
-  resumeAudio,
   stopAudio,
   pauseTTSWebView,
   resumeTTSWebView,
@@ -14,37 +13,60 @@ import {
 } from '@utils/ttsService';
 import { updateTTSPlaybackState } from '@utils/ttsNotification';
 import { navigate } from '@navigators/RootNavigation';
+
 import IconButton from './IconButtonV2/IconButtonV2';
 
 const TTSMiniPlayer: React.FC = () => {
   const theme = useTheme();
+
   const { queue, currentChapterIndex, isPlaying, setIsPlaying, clearQueue } =
     useTTSStore();
 
   const currentItem = queue[currentChapterIndex];
-  const isVisible = queue.length > 0;
+  const isVisible = queue.length > 0 && Boolean(currentItem);
 
   const handleTogglePlay = useCallback(() => {
     if (isPlaying) {
-      pauseAudio();
-      pauseTTSWebView();
+      const handled = pauseTTSWebView();
+
+      if (!handled) {
+        return;
+      }
+
       setIsPlaying(false);
       updateTTSPlaybackState(false);
-    } else {
-      resumeAudio();
-      resumeTTSWebView();
-      setIsPlaying(true);
-      updateTTSPlaybackState(true);
+      return;
     }
+
+    const handled = resumeTTSWebView();
+
+    if (!handled) {
+      return;
+    }
+
+    setIsPlaying(true);
+    updateTTSPlaybackState(true);
   }, [isPlaying, setIsPlaying]);
 
   const handleStop = useCallback(() => {
-    stopAudio();
-    stopTTSWebView();
+    const handled = stopTTSWebView();
+
+    if (!handled) {
+      stopAudio();
+    }
+
     setIsPlaying(false);
     clearQueue();
     updateTTSPlaybackState(false);
   }, [clearQueue, setIsPlaying]);
+
+  const handlePrevious = useCallback(() => {
+    prevTTSWebView();
+  }, []);
+
+  const handleNext = useCallback(() => {
+    nextTTSWebView();
+  }, []);
 
   const handleOpenReader = useCallback(() => {
     if (!currentItem) {
@@ -88,7 +110,9 @@ const TTSMiniPlayer: React.FC = () => {
       onPress={handleOpenReader}
       style={({ pressed }) => [
         styles.container,
-        { backgroundColor: pressed ? theme.surfaceVariant : theme.surface },
+        {
+          backgroundColor: pressed ? theme.surfaceVariant : theme.surface,
+        },
       ]}
     >
       <View style={styles.meta}>
@@ -98,6 +122,7 @@ const TTSMiniPlayer: React.FC = () => {
         >
           {currentItem.chapterName || 'TTS'}
         </Text>
+
         <Text
           style={[styles.subtitle, { color: theme.onSurfaceVariant }]}
           numberOfLines={1}
@@ -105,18 +130,22 @@ const TTSMiniPlayer: React.FC = () => {
           {`Chapter ${currentChapterIndex + 1} of ${queue.length}`}
         </Text>
       </View>
+
       <View style={styles.controls}>
         <IconButton
           name="skip-previous"
-          onPress={prevTTSWebView}
+          onPress={handlePrevious}
           theme={theme}
         />
+
         <IconButton
           name={isPlaying ? 'pause' : 'play'}
           onPress={handleTogglePlay}
           theme={theme}
         />
-        <IconButton name="skip-next" onPress={nextTTSWebView} theme={theme} />
+
+        <IconButton name="skip-next" onPress={handleNext} theme={theme} />
+
         <IconButton name="stop" onPress={handleStop} theme={theme} />
       </View>
     </Pressable>
@@ -141,18 +170,22 @@ const styles = StyleSheet.create({
     zIndex: 999,
     elevation: 12,
   },
+
   meta: {
     flex: 1,
     paddingRight: 12,
   },
+
   title: {
     fontSize: 14,
     fontWeight: '600',
   },
+
   subtitle: {
     fontSize: 12,
     marginTop: 2,
   },
+
   controls: {
     flexDirection: 'row',
     alignItems: 'center',

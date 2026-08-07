@@ -54,6 +54,19 @@ type WebViewReaderProps = {
   onPress(): void;
 };
 
+type NativeTTSPlaybackRequest = {
+  segments: string[];
+  index: number;
+  voiceIdentifier: string;
+  language: string;
+  rate: number;
+  pitch: number;
+  sessionId: number;
+};
+
+const TTS_RETRY_DELAY_MS = 750;
+const TTS_MAX_RETRIES = 1;
+
 const onLogMessage = (payload: { nativeEvent: { data: string } }) => {
   const dataPayload = JSON.parse(payload.nativeEvent.data);
   if (dataPayload) {
@@ -122,6 +135,10 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
   const ttsChapterIdRef = useRef<number | null>(null);
   const speechSessionRef = useRef<number>(0);
   const pendingNavigationRef = useRef<'NEXT' | 'PREV' | null>(null);
+  const ttsRetryCountRef = useRef<number>(0);
+  const ttsFallbackVoiceRef = useRef<boolean>(false);
+  const ttsRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastTTSPlaybackRef = useRef<NativeTTSPlaybackRequest | null>(null);
 
   const {
     queue: ttsQueue,
@@ -158,6 +175,14 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
     ttsSegmentsRef.current = [];
     ttsIndexRef.current = 0;
     ttsChapterIdRef.current = null;
+    ttsRetryCountRef.current = 0;
+    ttsFallbackVoiceRef.current = false;
+    lastTTSPlaybackRef.current = null;
+
+    if (ttsRetryTimerRef.current) {
+      clearTimeout(ttsRetryTimerRef.current);
+      ttsRetryTimerRef.current = null;
+    }
   }, [chapter.id]);
 
   const requestChapterNavigation = useCallback(
@@ -190,6 +215,14 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       isSpeakingRef.current = false;
       nativePlaybackStartedRef.current = false;
       nativePlaybackPausedRef.current = false;
+      ttsRetryCountRef.current = 0;
+      ttsFallbackVoiceRef.current = false;
+      lastTTSPlaybackRef.current = null;
+
+      if (ttsRetryTimerRef.current) {
+        clearTimeout(ttsRetryTimerRef.current);
+        ttsRetryTimerRef.current = null;
+      }
 
       const navigateWhenActive = () => {
         if (pendingNavigationRef.current !== position) {
@@ -293,7 +326,36 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
     const playListener = ttsMediaEmitter.addListener('TTSPlay', () => {
       nativePlaybackPausedRef.current = false;
       isSpeakingRef.current = true;
-      NativeTTSMediaControl.resumePlayback();
+
+      if (nativePlaybackStartedRef.current) {
+        NativeTTSMediaControl.resumePlayback();
+      } else {
+        const lastPlayback = lastTTSPlaybackRef.current;
+
+        if (
+          lastPlayback &&
+          lastPlayback.sessionId === speechSessionRef.current &&
+          ttsSegmentsRef.current.length > 0
+        ) {
+          const restartIndex = Math.min(
+            Math.max(ttsIndexRef.current, 0),
+            ttsSegmentsRef.current.length - 1,
+          );
+
+          ttsRetryCountRef.current = 0;
+          nativePlaybackStartedRef.current = true;
+
+          NativeTTSMediaControl.startPlayback(
+            JSON.stringify(lastPlayback.segments),
+            restartIndex,
+            ttsFallbackVoiceRef.current ? '' : lastPlayback.voiceIdentifier,
+            lastPlayback.language,
+            lastPlayback.rate,
+            lastPlayback.pitch,
+          );
+        }
+      }
+
       webViewRef.current?.injectJavaScript(`
         if (window.tts && !tts.reading) { tts.resume(); }
         true;
@@ -315,6 +377,15 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       nativePlaybackStartedRef.current = false;
       nativePlaybackPausedRef.current = false;
       isSpeakingRef.current = false;
+      ttsRetryCountRef.current = 0;
+      ttsFallbackVoiceRef.current = false;
+      lastTTSPlaybackRef.current = null;
+
+      if (ttsRetryTimerRef.current) {
+        clearTimeout(ttsRetryTimerRef.current);
+        ttsRetryTimerRef.current = null;
+      }
+
       webViewRef.current?.injectJavaScript(`
         if (window.tts) { tts.stop(); }
         true;
@@ -362,6 +433,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
         nativePlaybackStartedRef.current = true;
         nativePlaybackPausedRef.current = false;
         isSpeakingRef.current = true;
+        ttsRetryCountRef.current = 0;
         ttsIndexRef.current = index;
         updateCurrentItemCurrentIndex(index);
         updateTTSProgress(index, ttsSegmentsRef.current.length);
@@ -418,8 +490,107 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
 
     const nativeErrorListener = ttsMediaEmitter.addListener(
       'TTSNativeError',
-      (event: { message?: string }) => {
-        console.warn('[TTS] Error del motor nativo:', event.message);
+      (event: { message?: string; code?: number }) => {
+        const playback = lastTTSPlaybackRef.current;
+        const currentSession = speechSessionRef.current;
+
+        console.warn('[TTS] Error del motor nativo:', {
+          message: event.message,
+          code: event.code,
+          index: ttsIndexRef.current,
+          retry: ttsRetryCountRef.current,
+          fallbackVoice: ttsFallbackVoiceRef.current,
+        });
+
+        if (!playback || playback.sessionId !== currentSession) {
+          return;
+        }
+
+        if (ttsRetryTimerRef.current) {
+          clearTimeout(ttsRetryTimerRef.current);
+          ttsRetryTimerRef.current = null;
+        }
+
+        const restartPlayback = (useSystemVoice: boolean) => {
+          if (playback.sessionId !== speechSessionRef.current) {
+            return;
+          }
+
+          const maxIndex = Math.max(playback.segments.length - 1, 0);
+          const restartIndex = Math.min(
+            Math.max(ttsIndexRef.current, 0),
+            maxIndex,
+          );
+
+          nativePlaybackStartedRef.current = true;
+          nativePlaybackPausedRef.current = false;
+          isSpeakingRef.current = true;
+
+          NativeTTSMediaControl.startPlayback(
+            JSON.stringify(playback.segments),
+            restartIndex,
+            useSystemVoice ? '' : playback.voiceIdentifier,
+            playback.language,
+            playback.rate,
+            playback.pitch,
+          );
+        };
+
+        // Primer fallo: repetimos exactamente el mismo segmento/cola.
+        if (ttsRetryCountRef.current < TTS_MAX_RETRIES) {
+          ttsRetryCountRef.current += 1;
+          NativeTTSMediaControl.stopNativePlayback();
+          nativePlaybackStartedRef.current = false;
+          isSpeakingRef.current = false;
+
+          ttsRetryTimerRef.current = setTimeout(() => {
+            ttsRetryTimerRef.current = null;
+            restartPlayback(ttsFallbackVoiceRef.current);
+          }, TTS_RETRY_DELAY_MS);
+          return;
+        }
+
+        // Si la voz seleccionada depende de red o dejó de responder,
+        // reiniciamos desde el mismo índice usando la voz del sistema.
+        if (!ttsFallbackVoiceRef.current && playback.voiceIdentifier) {
+          ttsFallbackVoiceRef.current = true;
+          ttsRetryCountRef.current = 0;
+          NativeTTSMediaControl.stopNativePlayback();
+          nativePlaybackStartedRef.current = false;
+          isSpeakingRef.current = false;
+
+          console.warn(
+            '[TTS] Reintentando con la voz predeterminada del sistema',
+          );
+
+          ttsRetryTimerRef.current = setTimeout(() => {
+            ttsRetryTimerRef.current = null;
+            restartPlayback(true);
+          }, TTS_RETRY_DELAY_MS);
+          return;
+        }
+
+        // Si también falla la voz del sistema, conservamos la posición y
+        // pausamos. Nunca avanzamos silenciosamente al siguiente segmento.
+        NativeTTSMediaControl.stopNativePlayback();
+        nativePlaybackStartedRef.current = false;
+        nativePlaybackPausedRef.current = true;
+        isSpeakingRef.current = false;
+        isTTSReadingRef.current = false;
+        setTTSIsPlaying(false);
+        updateTTSPlaybackState(false);
+
+        updateTTSNotification({
+          novelName: novel?.name || 'Unknown',
+          chapterName: chapter.name,
+          coverUri: novel?.cover || '',
+          isPlaying: false,
+        });
+
+        webViewRef.current?.injectJavaScript(`
+          if (window.tts && tts.reading) { tts.pause(); }
+          true;
+        `);
       },
     );
 
@@ -436,8 +607,11 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       nativeErrorListener.remove();
     };
   }, [
+    chapter.name,
     clearTTSQueue,
     nextChapter,
+    novel?.cover,
+    novel?.name,
     requestChapterNavigation,
     setTTSCurrentChapterIndex,
     setTTSIsPlaying,
@@ -461,8 +635,15 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       if (!isTTSReadingRef.current) {
         updateTTSPlaybackState(false);
       }
+
+      if (ttsRetryTimerRef.current) {
+        clearTimeout(ttsRetryTimerRef.current);
+        ttsRetryTimerRef.current = null;
+      }
+
       NativeTTSMediaControl.stopNativePlayback();
       isSpeakingRef.current = false;
+      lastTTSPlaybackRef.current = null;
     };
   }, []);
 
@@ -479,6 +660,13 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
           isSpeakingRef.current = false;
           nativePlaybackStartedRef.current = false;
           nativePlaybackPausedRef.current = false;
+          ttsRetryCountRef.current = 0;
+          ttsFallbackVoiceRef.current = false;
+
+          if (ttsRetryTimerRef.current) {
+            clearTimeout(ttsRetryTimerRef.current);
+            ttsRetryTimerRef.current = null;
+          }
 
           webViewRef.current?.injectJavaScript(
             `
@@ -773,18 +961,36 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
         .trim(),
     );
 
+    const voiceIdentifier = ttsFallbackVoiceRef.current
+      ? ''
+      : selectedVoice?.identifier || '';
+    const language = selectedVoice?.language || '';
+    const rate = readerSettingsRef.current.tts?.rate || 1;
+    const pitch = readerSettingsRef.current.tts?.pitch || 1;
+
     ttsIndexRef.current = index;
     isSpeakingRef.current = true;
     nativePlaybackStartedRef.current = true;
     nativePlaybackPausedRef.current = false;
+    ttsRetryCountRef.current = 0;
+
+    lastTTSPlaybackRef.current = {
+      segments: preparedSegments,
+      index,
+      voiceIdentifier: selectedVoice?.identifier || '',
+      language,
+      rate,
+      pitch,
+      sessionId,
+    };
 
     NativeTTSMediaControl.startPlayback(
       JSON.stringify(preparedSegments),
       index,
-      selectedVoice?.identifier || '',
-      selectedVoice?.language || '',
-      readerSettingsRef.current.tts?.rate || 1,
-      readerSettingsRef.current.tts?.pitch || 1,
+      voiceIdentifier,
+      language,
+      rate,
+      pitch,
     );
   };
 
@@ -897,6 +1103,9 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
             ttsSegmentsRef.current = queue;
             ttsIndexRef.current = initialIndex;
             ttsChapterIdRef.current = chapter.id;
+            ttsRetryCountRef.current = 0;
+            ttsFallbackVoiceRef.current = false;
+            lastTTSPlaybackRef.current = null;
 
             setTTSQueue([
               {
@@ -974,6 +1183,12 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
                 isSpeakingRef.current = false;
               }
 
+              if (ttsRetryTimerRef.current) {
+                clearTimeout(ttsRetryTimerRef.current);
+                ttsRetryTimerRef.current = null;
+              }
+              ttsRetryCountRef.current = 0;
+
               ttsIndexRef.current = requestedIndex;
               updateCurrentItemCurrentIndex(requestedIndex);
 
@@ -1016,6 +1231,15 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
             nativePlaybackStartedRef.current = false;
             nativePlaybackPausedRef.current = false;
             isSpeakingRef.current = false;
+            ttsRetryCountRef.current = 0;
+            ttsFallbackVoiceRef.current = false;
+            lastTTSPlaybackRef.current = null;
+
+            if (ttsRetryTimerRef.current) {
+              clearTimeout(ttsRetryTimerRef.current);
+              ttsRetryTimerRef.current = null;
+            }
+
             if (!autoStartTTSRef.current) {
               isTTSReadingRef.current = false;
               setTTSIsPlaying(false);
