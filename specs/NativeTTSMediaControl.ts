@@ -37,6 +37,14 @@ export interface Spec extends TurboModule {
 
   speakTest(text: string): void;
 
+  requestBackgroundTTSStatus(): void;
+
+  openNotificationSettings(): void;
+
+  openBatteryOptimizationSettings(): void;
+
+  openTTSVoiceDataInstaller(): void;
+
   stopNativePlayback(): void;
 
   dismiss(): void;

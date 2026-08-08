@@ -1,13 +1,20 @@
 package com.rajarsheechatterjee.NativeTTSMediaControl
 
+import android.Manifest
+import android.content.ActivityNotFoundException
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
+import android.provider.Settings
 import android.speech.tts.TextToSpeech
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.ReactApplicationContext
@@ -28,6 +35,7 @@ class NativeTTSMediaControl(
 
     companion object {
         private const val EVENT_VOICE_METADATA = "TTSVoiceMetadata"
+        private const val EVENT_BACKGROUND_STATUS = "TTSBackgroundStatus"
     }
 
     private var listenerCount = 0
@@ -302,6 +310,103 @@ class NativeTTSMediaControl(
         voiceMetadataLoading = false
     }
 
+    private fun requestBackgroundStatus() {
+        val notificationPermissionGranted =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                ContextCompat.checkSelfPermission(
+                    appContext,
+                    Manifest.permission.POST_NOTIFICATIONS,
+                ) == PackageManager.PERMISSION_GRANTED
+            } else {
+                true
+            }
+
+        val notificationsEnabled =
+            NotificationManagerCompat.from(appContext).areNotificationsEnabled()
+
+        val batteryOptimizationIgnored =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val powerManager =
+                    appContext.getSystemService(Context.POWER_SERVICE) as PowerManager
+                powerManager.isIgnoringBatteryOptimizations(appContext.packageName)
+            } else {
+                true
+            }
+
+        sendEvent(
+            EVENT_BACKGROUND_STATUS,
+            Arguments.createMap().apply {
+                putInt("sdkInt", Build.VERSION.SDK_INT)
+                putBoolean(
+                    "notificationPermissionRequired",
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU,
+                )
+                putBoolean(
+                    "notificationPermissionGranted",
+                    notificationPermissionGranted,
+                )
+                putBoolean("notificationsEnabled", notificationsEnabled)
+                putBoolean(
+                    "batteryOptimizationIgnored",
+                    batteryOptimizationIgnored,
+                )
+            },
+        )
+    }
+
+    private fun openSettingsIntent(
+        intent: Intent,
+        fallback: Intent,
+    ) {
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+        try {
+            appContext.startActivity(intent)
+        } catch (_: ActivityNotFoundException) {
+            appContext.startActivity(fallback)
+        }
+    }
+
+    override fun requestBackgroundTTSStatus() {
+        requestBackgroundStatus()
+    }
+
+    override fun openNotificationSettings() {
+        val appDetailsIntent =
+            Intent(
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.parse("package:${appContext.packageName}"),
+            )
+
+        openSettingsIntent(
+            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                putExtra(Settings.EXTRA_APP_PACKAGE, appContext.packageName)
+            },
+            appDetailsIntent,
+        )
+    }
+
+    override fun openBatteryOptimizationSettings() {
+        val appDetailsIntent =
+            Intent(
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.parse("package:${appContext.packageName}"),
+            )
+
+        openSettingsIntent(
+            Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
+            appDetailsIntent,
+        )
+    }
+
+    override fun openTTSVoiceDataInstaller() {
+        openSettingsIntent(
+            Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA),
+            Intent(Settings.ACTION_SETTINGS),
+        )
+    }
+
     private fun foregroundIntent(action: String): Intent =
         Intent(appContext, NativeTTSPlaybackService::class.java).apply {
             this.action = action
@@ -536,8 +641,9 @@ class NativeTTSMediaControl(
         listenerCount++
         registerEventReceiver()
 
-        if (eventName == EVENT_VOICE_METADATA) {
-            requestVoiceMetadata()
+        when (eventName) {
+            EVENT_VOICE_METADATA -> requestVoiceMetadata()
+            EVENT_BACKGROUND_STATUS -> requestBackgroundStatus()
         }
     }
 

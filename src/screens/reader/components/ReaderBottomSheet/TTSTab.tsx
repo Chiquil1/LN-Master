@@ -1,5 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  AppState,
+  PermissionsAndroid,
+  Platform,
   ScrollView,
   StyleSheet,
   Text,
@@ -43,6 +46,14 @@ type NativeVoiceMetadataEvent = {
 type VoiceWithMetadata = Voice & {
   requiresNetwork?: boolean;
   isSystemVoice?: boolean;
+};
+
+type NativeBackgroundTTSStatus = {
+  sdkInt?: number;
+  notificationPermissionRequired?: boolean;
+  notificationPermissionGranted?: boolean;
+  notificationsEnabled?: boolean;
+  batteryOptimizationIgnored?: boolean;
 };
 
 interface VoicePickerModalProps {
@@ -367,6 +378,11 @@ const TTSTab: React.FC = () => {
 
   const [voices, setVoices] = useState<VoiceWithMetadata[]>([]);
   const [voiceModalVisible, setVoiceModalVisible] = useState(false);
+  const [nativeTTSEngineAvailable, setNativeTTSEngineAvailable] = useState<
+    boolean | undefined
+  >(undefined);
+  const [backgroundStatus, setBackgroundStatus] =
+    useState<NativeBackgroundTTSStatus>();
 
   useEffect(() => {
     let mounted = true;
@@ -442,6 +458,7 @@ const TTSTab: React.FC = () => {
       'TTSVoiceMetadata',
       (event: NativeVoiceMetadataEvent) => {
         nativeMetadata = event;
+        setNativeTTSEngineAvailable(event.available === true);
         mergeVoiceData();
       },
     );
@@ -478,6 +495,55 @@ const TTSTab: React.FC = () => {
     [tts, setChapterReaderSettings],
   );
 
+  const refreshBackgroundStatus = useCallback(() => {
+    NativeTTSMediaControl.requestBackgroundTTSStatus();
+  }, []);
+
+  useEffect(() => {
+    const statusSubscription = ttsMediaEmitter.addListener(
+      'TTSBackgroundStatus',
+      (event: NativeBackgroundTTSStatus) => {
+        setBackgroundStatus(event);
+      },
+    );
+
+    refreshBackgroundStatus();
+
+    const appStateSubscription = AppState.addEventListener('change', state => {
+      if (state === 'active') {
+        refreshBackgroundStatus();
+      }
+    });
+
+    return () => {
+      statusSubscription.remove();
+      appStateSubscription.remove();
+    };
+  }, [refreshBackgroundStatus]);
+
+  const handleNotificationSettings = useCallback(async () => {
+    const requiresRuntimePermission =
+      Platform.OS === 'android' &&
+      Number(Platform.Version) >= 33 &&
+      backgroundStatus?.notificationPermissionGranted !== true;
+
+    if (requiresRuntimePermission) {
+      const result = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS,
+      );
+
+      if (result === PermissionsAndroid.RESULTS.GRANTED) {
+        refreshBackgroundStatus();
+        return;
+      }
+    }
+
+    NativeTTSMediaControl.openNotificationSettings();
+  }, [
+    backgroundStatus?.notificationPermissionGranted,
+    refreshBackgroundStatus,
+  ]);
+
   const currentVoiceWithMetadata = useMemo(() => {
     const configuredVoice = tts?.voice;
 
@@ -486,6 +552,16 @@ const TTSTab: React.FC = () => {
       voices.find(voice => voice.isSystemVoice)
     );
   }, [tts?.voice, voices]);
+
+  const notificationReady =
+    backgroundStatus?.notificationsEnabled === true &&
+    backgroundStatus?.notificationPermissionGranted !== false;
+  const batteryOptimized =
+    backgroundStatus?.batteryOptimizationIgnored === false;
+  const selectedVoiceOffline =
+    currentVoiceWithMetadata?.requiresNetwork === false;
+  const selectedVoiceRequiresNetwork =
+    currentVoiceWithMetadata?.requiresNetwork === true;
 
   return (
     <>
@@ -652,6 +728,207 @@ const TTSTab: React.FC = () => {
                 theme={theme}
               />
 
+              <View
+                style={[
+                  styles.backgroundTTSContainer,
+                  { borderColor: theme.outline },
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.nativeTTSSectionTitle,
+                    { color: theme.onSurface },
+                  ]}
+                >
+                  TTS en segundo plano
+                </Text>
+
+                <Text
+                  style={[
+                    styles.backgroundTTSDescription,
+                    { color: theme.onSurfaceVariant },
+                  ]}
+                >
+                  Android mantiene la lectura con un servicio multimedia. Estos
+                  ajustes ayudan a que los controles y la reproducción sean más
+                  fiables con la pantalla apagada.
+                </Text>
+
+                <View style={styles.statusList}>
+                  <View style={styles.statusRow}>
+                    <Text
+                      style={[styles.statusLabel, { color: theme.onSurface }]}
+                    >
+                      Motor TTS nativo
+                    </Text>
+                    <Text
+                      style={[
+                        styles.statusValue,
+                        {
+                          color:
+                            nativeTTSEngineAvailable === false
+                              ? theme.onSurfaceVariant
+                              : theme.primary,
+                        },
+                      ]}
+                    >
+                      {nativeTTSEngineAvailable === undefined
+                        ? '… Comprobando'
+                        : nativeTTSEngineAvailable
+                        ? '✓ Disponible'
+                        : '⚠ No disponible'}
+                    </Text>
+                  </View>
+
+                  <View style={styles.statusRow}>
+                    <Text
+                      style={[styles.statusLabel, { color: theme.onSurface }]}
+                    >
+                      Voz seleccionada
+                    </Text>
+                    <Text
+                      style={[
+                        styles.statusValue,
+                        {
+                          color: selectedVoiceOffline
+                            ? theme.primary
+                            : theme.onSurfaceVariant,
+                        },
+                      ]}
+                    >
+                      {selectedVoiceOffline
+                        ? '✓ Offline'
+                        : selectedVoiceRequiresNetwork
+                        ? '☁ Requiere Internet'
+                        : '? Sin confirmar'}
+                    </Text>
+                  </View>
+
+                  <View style={styles.statusRow}>
+                    <Text
+                      style={[styles.statusLabel, { color: theme.onSurface }]}
+                    >
+                      Servicio multimedia
+                    </Text>
+                    <Text
+                      style={[styles.statusValue, { color: theme.primary }]}
+                    >
+                      ✓ Disponible
+                    </Text>
+                  </View>
+
+                  <View style={styles.statusRow}>
+                    <Text
+                      style={[styles.statusLabel, { color: theme.onSurface }]}
+                    >
+                      Notificaciones
+                    </Text>
+                    <Text
+                      style={[
+                        styles.statusValue,
+                        {
+                          color: notificationReady
+                            ? theme.primary
+                            : theme.onSurfaceVariant,
+                        },
+                      ]}
+                    >
+                      {backgroundStatus === undefined
+                        ? '… Comprobando'
+                        : notificationReady
+                        ? '✓ Activadas'
+                        : '⚠ Desactivadas'}
+                    </Text>
+                  </View>
+
+                  <View style={styles.statusRow}>
+                    <Text
+                      style={[styles.statusLabel, { color: theme.onSurface }]}
+                    >
+                      Optimización Doze
+                    </Text>
+                    <Text
+                      style={[
+                        styles.statusValue,
+                        {
+                          color: batteryOptimized
+                            ? theme.onSurfaceVariant
+                            : theme.primary,
+                        },
+                      ]}
+                    >
+                      {backgroundStatus === undefined
+                        ? '… Comprobando'
+                        : batteryOptimized
+                        ? '⚠ Activa (opcional)'
+                        : '✓ Sin restricción'}
+                    </Text>
+                  </View>
+                </View>
+
+                {!notificationReady && (
+                  <Text
+                    style={[
+                      styles.backgroundTTSHint,
+                      { color: theme.onSurfaceVariant },
+                    ]}
+                  >
+                    Los controles de una sesión multimedia pueden seguir
+                    apareciendo en Android 13+, pero activar las notificaciones
+                    generales mejora la visibilidad y evita configuraciones
+                    ambiguas del sistema.
+                  </Text>
+                )}
+
+                {batteryOptimized && (
+                  <Text
+                    style={[
+                      styles.backgroundTTSHint,
+                      { color: theme.onSurfaceVariant },
+                    ]}
+                  >
+                    Quitar la optimización de batería es opcional. Úsalo solo si
+                    tu teléfono detiene la lectura al bloquear la pantalla.
+                  </Text>
+                )}
+
+                <Button
+                  title={
+                    backgroundStatus?.notificationPermissionGranted === false
+                      ? 'Activar notificaciones'
+                      : 'Ajustes de notificaciones'
+                  }
+                  mode="outlined"
+                  onPress={handleNotificationSettings}
+                  style={styles.nativeTTSButton}
+                />
+
+                <Button
+                  title="Configurar batería"
+                  mode="outlined"
+                  onPress={() => {
+                    NativeTTSMediaControl.openBatteryOptimizationSettings();
+                  }}
+                  style={styles.nativeTTSButton}
+                />
+
+                <Button
+                  title="Instalar o administrar voces TTS"
+                  mode="outlined"
+                  onPress={() => {
+                    NativeTTSMediaControl.openTTSVoiceDataInstaller();
+                  }}
+                  style={styles.nativeTTSButton}
+                />
+
+                <Button
+                  title="Actualizar estado"
+                  mode="outlined"
+                  onPress={refreshBackgroundStatus}
+                  style={styles.nativeTTSButton}
+                />
+              </View>
+
               <View style={styles.nativeTTSButtonContainer}>
                 <Text
                   style={[
@@ -785,6 +1062,41 @@ const styles = StyleSheet.create({
   },
   slider: {
     height: 40,
+  },
+  backgroundTTSContainer: {
+    marginHorizontal: 16,
+    marginVertical: 12,
+    padding: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 10,
+  },
+  backgroundTTSDescription: {
+    fontSize: 13,
+    lineHeight: 18,
+    marginBottom: 12,
+  },
+  backgroundTTSHint: {
+    fontSize: 12,
+    lineHeight: 17,
+    marginTop: 8,
+  },
+  statusList: {
+    gap: 8,
+  },
+  statusRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    gap: 12,
+  },
+  statusLabel: {
+    flex: 1,
+    fontSize: 13,
+  },
+  statusValue: {
+    flexShrink: 1,
+    fontSize: 12,
+    textAlign: 'right',
   },
   nativeTTSButtonContainer: {
     paddingHorizontal: 16,
