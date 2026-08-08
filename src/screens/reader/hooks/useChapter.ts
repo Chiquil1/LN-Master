@@ -259,23 +259,34 @@ export default function useChapter(
   const prepareTTSChapterQueue = useCallback(
     async (
       maxChapters = DEFAULT_TTS_CHAPTER_BUFFER_SIZE,
+      anchorChapterId?: number,
     ): Promise<PreparedTTSChapter[]> => {
       const normalizedLimit = Math.max(1, Math.floor(maxChapters));
+      const anchorChapter =
+        typeof anchorChapterId === 'number' && anchorChapterId !== chapter.id
+          ? await getDbChapter(anchorChapterId)
+          : chapter;
+
+      if (!anchorChapter) {
+        return [];
+      }
+
       const queueChapters: ChapterInfo[] = [];
 
       // Reservamos una posición para el capítulo anterior cuando exista. Así,
-      // Android puede ejecutar Previous sin depender de React/WebView.
+      // Android puede ejecutar Previous sin depender de React/WebView y, cuando
+      // se agota el buffer, podemos reconstruirlo alrededor del capítulo nativo.
       if (normalizedLimit > 1) {
-        const previousChapter = await getPrevChapterForTTS(chapter);
+        const previousChapter = await getPrevChapterForTTS(anchorChapter);
 
         if (previousChapter) {
           queueChapters.push(previousChapter);
         }
       }
 
-      queueChapters.push(chapter);
+      queueChapters.push(anchorChapter);
 
-      let nextQueueChapter: ChapterInfo | undefined = chapter;
+      let nextQueueChapter: ChapterInfo | undefined = anchorChapter;
 
       while (queueChapters.length < normalizedLimit && nextQueueChapter) {
         nextQueueChapter = await getNextChapterForTTS(nextQueueChapter);
@@ -292,14 +303,14 @@ export default function useChapter(
       const preparedChapters: PreparedTTSChapter[] = [];
 
       for (const queueChapter of queueChapters) {
-        const isCurrentChapter = queueChapter.id === chapter.id;
+        const isVisibleChapter = queueChapter.id === chapter.id;
         const cachedText = chapterTextCache.read(queueChapter.id);
         const rawText = await (cachedText ??
-          loadChapterText(queueChapter, isCurrentChapter));
+          loadChapterText(queueChapter, isVisibleChapter));
 
         // Un fallo de precarga de un capítulo adyacente no debe impedir que
-        // el capítulo actual ni el resto del buffer sigan disponibles.
-        if (!rawText && !isCurrentChapter) {
+        // el capítulo visible ni el resto del buffer sigan disponibles.
+        if (!rawText && !isVisibleChapter) {
           continue;
         }
 

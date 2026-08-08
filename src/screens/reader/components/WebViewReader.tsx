@@ -99,6 +99,10 @@ type NativeTTSProgressEvent = {
   chapterId?: number;
 };
 
+type NativeTTSChapterBoundaryEvent = NativeTTSProgressEvent & {
+  message?: 'next' | 'previous' | string;
+};
+
 type NativeTTSErrorEvent = NativeTTSProgressEvent & {
   message?: string;
   code?: number;
@@ -188,6 +192,10 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
   const ttsQueuePreparationRef = useRef<Promise<BufferedTTSQueueItem[]> | null>(
     null,
   );
+  const nativeBoundaryRefillRef = useRef<
+    ((event: NativeTTSChapterBoundaryEvent) => void) | null
+  >(null);
+  const nativeBoundaryRefillPromiseRef = useRef<Promise<void> | null>(null);
   const lastTTSPlaybackRef = useRef<NativeTTSPlaybackRequest | null>(null);
 
   const {
@@ -242,6 +250,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
     ttsFallbackVoiceRef.current = false;
     bufferedTTSQueueRef.current = [];
     ttsQueuePreparationRef.current = null;
+    nativeBoundaryRefillPromiseRef.current = null;
     pendingNativeChapterIndexRef.current = null;
     lastTTSPlaybackRef.current = null;
 
@@ -530,6 +539,13 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       requestChapterNavigation('NEXT');
     });
 
+    const chapterBoundaryListener = ttsMediaEmitter.addListener(
+      'TTSNativeChapterBoundary',
+      (event: NativeTTSChapterBoundaryEvent) => {
+        nativeBoundaryRefillRef.current?.(event);
+      },
+    );
+
     const chapterChangedListener = ttsMediaEmitter.addListener(
       'TTSNativeChapterChanged',
       (event: NativeTTSProgressEvent) => {
@@ -707,15 +723,11 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
           return;
         }
 
+        // Este evento queda reservado para la cola antigua de un solo capítulo.
+        // startChapterQueue usa autoavance + TTSNativeChapterBoundary.
         nativePlaybackStartedRef.current = false;
         nativePlaybackPausedRef.current = false;
         isSpeakingRef.current = false;
-
-        if (nextChapter) {
-          requestChapterNavigation('NEXT');
-          return;
-        }
-
         isTTSReadingRef.current = false;
         setTTSIsPlaying(false);
         clearTTSQueue();
@@ -942,6 +954,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       rewindListener.remove();
       prevListener.remove();
       nextListener.remove();
+      chapterBoundaryListener.remove();
       chapterChangedListener.remove();
       seekToListener.remove();
       segmentListener.remove();
@@ -1401,15 +1414,21 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
   const prepareBufferedTTSQueue = async (
     currentSegments: string[],
     initialIndex: number,
+    anchorChapterId?: number,
+    useVisibleChapterSegments = true,
   ) => {
     const preparedChapters = await prepareTTSChapterQueue(
       TTS_CHAPTER_BUFFER_SIZE,
+      anchorChapterId,
     );
 
     return preparedChapters
       .map(preparedChapter => {
-        const isCurrentChapter = preparedChapter.chapter.id === chapter.id;
-        const textSegments = isCurrentChapter
+        const useWebViewSegments =
+          useVisibleChapterSegments &&
+          preparedChapter.chapter.id === chapter.id &&
+          currentSegments.length > 0;
+        const textSegments = useWebViewSegments
           ? currentSegments
           : extractTTSChapterSegments(preparedChapter.chapterText);
 
@@ -1418,11 +1437,197 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
           chapterName: preparedChapter.chapter.name,
           novelId: preparedChapter.chapter.novelId,
           textSegments,
-          currentIndex: isCurrentChapter ? initialIndex : 0,
+          currentIndex: useWebViewSegments ? initialIndex : 0,
         };
       })
       .filter(item => item.textSegments.length > 0);
   };
+
+  const createNativeTTSChapters = (
+    bufferedQueue: BufferedTTSQueueItem[],
+  ): NativeTTSChapter[] =>
+    bufferedQueue
+      .map(queueItem => ({
+        chapterId: queueItem.chapterId,
+        chapterName: queueItem.chapterName,
+        novelName: novel?.name || 'Unknown',
+        coverUri: novel?.cover || '',
+        segments: queueItem.textSegments
+          .map(segment =>
+            cleanTextForTTS(segment)
+              .replace(/\\/g, '')
+              .replace(/""/g, '"')
+              .replace(/\\'/g, "'")
+              .replace(/\\"/g, '"')
+              .replace(/[`]/g, '')
+              .replace(/\s+/g, ' ')
+              .trim(),
+          )
+          .filter(segment => segment.length >= 2),
+      }))
+      .filter(queueItem => queueItem.segments.length > 0);
+
+  const pauseAtNativeChapterBoundary = () => {
+    // Conservamos vivo el foreground service. Así el usuario puede pulsar Play
+    // y Android volverá a emitir el borde para reintentar la recarga.
+    nativePlaybackStartedRef.current = true;
+    nativePlaybackPausedRef.current = true;
+    isSpeakingRef.current = false;
+    isTTSReadingRef.current = false;
+    setTTSIsPlaying(false);
+    updateTTSPlaybackState(false);
+
+    webViewRef.current?.injectJavaScript(`
+      if (window.tts && tts.reading) { tts.pause(); }
+      true;
+    `);
+  };
+
+  const refillNativeQueueAtBoundary = async (
+    event: NativeTTSChapterBoundaryEvent,
+  ) => {
+    const refillSessionId = speechSessionRef.current;
+    const boundaryChapterId =
+      typeof event.chapterId === 'number'
+        ? event.chapterId
+        : ttsChapterIdRef.current;
+    const direction = event.message === 'previous' ? 'previous' : 'next';
+
+    if (boundaryChapterId === null) {
+      pauseAtNativeChapterBoundary();
+      return;
+    }
+
+    try {
+      // Para un capítulo que Android está leyendo en segundo plano no usamos
+      // segmentos del DOM visible: reconstruimos todo desde cache/plugin.
+      const bufferedQueue = await prepareBufferedTTSQueue(
+        [],
+        0,
+        boundaryChapterId,
+        false,
+      );
+      if (refillSessionId !== speechSessionRef.current) {
+        return;
+      }
+
+      const boundaryIndex = bufferedQueue.findIndex(
+        item => item.chapterId === boundaryChapterId,
+      );
+      const targetBufferedIndex =
+        direction === 'previous' ? boundaryIndex - 1 : boundaryIndex + 1;
+      const targetBufferedItem = bufferedQueue[targetBufferedIndex];
+
+      if (boundaryIndex < 0 || !targetBufferedItem) {
+        pauseAtNativeChapterBoundary();
+        return;
+      }
+
+      const nativeChapters = createNativeTTSChapters(bufferedQueue);
+      const nativeChapterIndex = nativeChapters.findIndex(
+        item => item.chapterId === targetBufferedItem.chapterId,
+      );
+
+      if (nativeChapterIndex < 0) {
+        pauseAtNativeChapterBoundary();
+        return;
+      }
+
+      // Mantener los índices de Zustand alineados con la cola que Android
+      // realmente recibió, incluso si un capítulo quedó sin texto utilizable.
+      const nativeChapterIds = new Set(
+        nativeChapters.map(item => item.chapterId),
+      );
+      const synchronizedQueue = bufferedQueue.filter(item =>
+        nativeChapterIds.has(item.chapterId),
+      );
+      const synchronizedIndex = synchronizedQueue.findIndex(
+        item => item.chapterId === targetBufferedItem.chapterId,
+      );
+      const targetQueueItem = synchronizedQueue[synchronizedIndex];
+
+      if (synchronizedIndex < 0 || !targetQueueItem) {
+        pauseAtNativeChapterBoundary();
+        return;
+      }
+
+      const previousPlayback = lastTTSPlaybackRef.current;
+      const selectedVoice = readerSettingsRef.current.tts?.voice;
+      const voiceIdentifier = ttsFallbackVoiceRef.current
+        ? ''
+        : previousPlayback?.voiceIdentifier || selectedVoice?.identifier || '';
+      const language =
+        previousPlayback?.language || selectedVoice?.language || '';
+      const rate =
+        previousPlayback?.rate || readerSettingsRef.current.tts?.rate || 1;
+      const pitch =
+        previousPlayback?.pitch || readerSettingsRef.current.tts?.pitch || 1;
+
+      bufferedTTSQueueRef.current = synchronizedQueue;
+      setTTSQueue(synchronizedQueue, synchronizedIndex);
+      setTTSCurrentChapterIndex(synchronizedIndex);
+      ttsSegmentsRef.current = targetQueueItem.textSegments;
+      ttsChapterIdRef.current = targetQueueItem.chapterId;
+      ttsIndexRef.current = 0;
+      pendingNativeChapterIndexRef.current = synchronizedIndex;
+      nativePlaybackStartedRef.current = true;
+      nativePlaybackPausedRef.current = false;
+      isSpeakingRef.current = true;
+      isTTSReadingRef.current = true;
+      setTTSIsPlaying(true);
+      ttsRetryCountRef.current = 0;
+
+      lastTTSPlaybackRef.current = {
+        chapters: nativeChapters,
+        chapterIndex: nativeChapterIndex,
+        segmentIndex: 0,
+        voiceIdentifier:
+          previousPlayback?.voiceIdentifier || selectedVoice?.identifier || '',
+        language,
+        rate,
+        pitch,
+        sessionId: speechSessionRef.current,
+      };
+
+      NativeTTSMediaControl.startChapterQueue(
+        JSON.stringify(nativeChapters),
+        nativeChapterIndex,
+        0,
+        voiceIdentifier,
+        language,
+        rate,
+        pitch,
+      );
+
+      if (appStateRef.current === 'active') {
+        setTimeout(syncVisibleChapterToNativeQueue, 50);
+      }
+    } catch (error) {
+      console.warn('[TTS] No se pudo renovar el buffer nativo:', error);
+      pauseAtNativeChapterBoundary();
+    }
+  };
+
+  useEffect(() => {
+    nativeBoundaryRefillRef.current = event => {
+      if (nativeBoundaryRefillPromiseRef.current) {
+        return;
+      }
+
+      const refillPromise = refillNativeQueueAtBoundary(event);
+      nativeBoundaryRefillPromiseRef.current = refillPromise;
+
+      void refillPromise.finally(() => {
+        if (nativeBoundaryRefillPromiseRef.current === refillPromise) {
+          nativeBoundaryRefillPromiseRef.current = null;
+        }
+      });
+    };
+
+    return () => {
+      nativeBoundaryRefillRef.current = null;
+    };
+  });
 
   const speakText = async (
     text: string,
@@ -1481,42 +1686,38 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
     const rate = readerSettingsRef.current.tts?.rate || 1;
     const pitch = readerSettingsRef.current.tts?.pitch || 1;
 
-    const nativeChapters = bufferedQueue
-      .map(queueItem => ({
-        chapterId: queueItem.chapterId,
-        chapterName: queueItem.chapterName,
-        novelName: novel?.name || 'Unknown',
-        coverUri: novel?.cover || '',
-        segments: queueItem.textSegments
-          .map(segment =>
-            cleanTextForTTS(segment)
-              .replace(/\\/g, '')
-              .replace(/""/g, '"')
-              .replace(/\\'/g, "'")
-              .replace(/\\"/g, '"')
-              .replace(/[`]/g, '')
-              .replace(/\s+/g, ' ')
-              .trim(),
-          )
-          .filter(segment => segment.length >= 2),
-      }))
-      .filter(queueItem => queueItem.segments.length > 0);
+    const nativeChapters = createNativeTTSChapters(bufferedQueue);
 
     if (nativeChapters.length === 0) {
       return;
     }
 
-    const nativeChapterIndex = Math.max(
-      nativeChapters.findIndex(item => item.chapterId === chapter.id),
-      0,
+    const nativeChapterIds = new Set(
+      nativeChapters.map(item => item.chapterId),
     );
+    const synchronizedQueue = bufferedQueue.filter(item =>
+      nativeChapterIds.has(item.chapterId),
+    );
+    const nativeChapterIndex = nativeChapters.findIndex(
+      item => item.chapterId === chapter.id,
+    );
+    const synchronizedChapterIndex = synchronizedQueue.findIndex(
+      item => item.chapterId === chapter.id,
+    );
+
+    if (nativeChapterIndex < 0 || synchronizedChapterIndex < 0) {
+      return;
+    }
+
     const activeSegments = nativeChapters[nativeChapterIndex]?.segments ?? [];
     const normalizedSegmentIndex = Math.min(
       Math.max(index, 0),
       Math.max(activeSegments.length - 1, 0),
     );
 
-    setTTSCurrentChapterIndex(nativeChapterIndex);
+    bufferedTTSQueueRef.current = synchronizedQueue;
+    setTTSQueue(synchronizedQueue, synchronizedChapterIndex);
+    setTTSCurrentChapterIndex(synchronizedChapterIndex);
     ttsIndexRef.current = normalizedSegmentIndex;
     isSpeakingRef.current = true;
     nativePlaybackStartedRef.current = true;

@@ -650,11 +650,12 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
 
     private fun finishQueue() {
         activeUtteranceId = null
-        isPlaying = false
-        isPaused = false
-        updateNotification()
 
         if (isTestPlayback) {
+            isPlaying = false
+            isPaused = false
+            updateNotification()
+
             mainHandler.postDelayed(
                 {
                     if (isTestPlayback && !isPlaying) {
@@ -666,15 +667,48 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
             return
         }
 
-        val activeChapter = chapterQueue.getOrNull(currentChapterIndex)
+        // Cuando existe una cola de capítulos, el final de un capítulo no es
+        // el final de la reproducción. Android avanza por sí solo mientras el
+        // siguiente capítulo ya esté cargado, incluso con el WebView suspendido.
+        if (chapterQueue.isNotEmpty()) {
+            val nextChapterIndex = currentChapterIndex + 1
+
+            if (nextChapterIndex <= chapterQueue.lastIndex) {
+                switchToChapter(nextChapterIndex)
+                return
+            }
+
+            // Se agotó el buffer nativo. Dejamos el servicio vivo y pausado y
+            // avisamos a React Native para que lo rellene sin necesitar WebView.
+            // Si JS está suspendido, Play volverá a provocar este evento y podrá
+            // reintentarse cuando el proceso vuelva a estar disponible.
+            isPlaying = false
+            isPaused = false
+            updateNotification()
+
+            val activeChapter = chapterQueue.getOrNull(currentChapterIndex)
+
+            emitEvent(
+                "TTSNativeChapterBoundary",
+                position = configuredTotal,
+                total = configuredTotal,
+                chapterIndex = currentChapterIndex,
+                chapterId = activeChapter?.chapterId,
+                message = "next",
+            )
+            return
+        }
+
+        // Compatibilidad con la reproducción antigua de una sola cola (por
+        // ejemplo, usos que no pasen por startChapterQueue).
+        isPlaying = false
+        isPaused = false
+        updateNotification()
 
         emitEvent(
             "TTSNativeQueueFinished",
             position = configuredTotal,
             total = configuredTotal,
-            chapterIndex =
-                if (activeChapter != null) currentChapterIndex else null,
-            chapterId = activeChapter?.chapterId,
         )
     }
 
@@ -691,7 +725,16 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun resumePlayback() {
-        if (!isPaused || textSegments.isEmpty()) {
+        if (textSegments.isEmpty()) {
+            return
+        }
+
+        if (!isPaused && currentIndex >= textSegments.size && chapterQueue.isNotEmpty()) {
+            finishQueue()
+            return
+        }
+
+        if (!isPaused) {
             return
         }
 
