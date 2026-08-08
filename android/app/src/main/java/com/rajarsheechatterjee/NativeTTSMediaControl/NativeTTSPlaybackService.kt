@@ -153,14 +153,8 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
             ACTION_PAUSE -> pausePlayback()
             ACTION_RESUME -> resumePlayback()
             ACTION_STOP -> stopPlayback(stopService = true)
-            ACTION_PREVIOUS -> {
-                pausePlayback()
-                emitEvent("TTSPrev")
-            }
-            ACTION_NEXT -> {
-                pausePlayback()
-                emitEvent("TTSNext")
-            }
+            ACTION_PREVIOUS -> skipToPreviousChapter()
+            ACTION_NEXT -> skipToNextChapter()
             ACTION_REWIND -> {
                 restartCurrentSegment()
                 emitEvent("TTSRewind")
@@ -565,6 +559,83 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
                 "El motor TTS no pudo leer el fragmento"
         }
 
+    private fun skipToPreviousChapter() {
+        if (chapterQueue.isEmpty()) {
+            pausePlayback()
+            emitEvent("TTSPrev")
+            return
+        }
+
+        val targetIndex = currentChapterIndex - 1
+
+        if (!switchToChapter(targetIndex)) {
+            val activeChapter = chapterQueue.getOrNull(currentChapterIndex)
+
+            emitEvent(
+                "TTSNativeChapterBoundary",
+                position = currentIndex,
+                total = configuredTotal,
+                chapterIndex = currentChapterIndex,
+                chapterId = activeChapter?.chapterId,
+                message = "previous",
+            )
+        }
+    }
+
+    private fun skipToNextChapter() {
+        if (chapterQueue.isEmpty()) {
+            pausePlayback()
+            emitEvent("TTSNext")
+            return
+        }
+
+        val targetIndex = currentChapterIndex + 1
+
+        if (!switchToChapter(targetIndex)) {
+            val activeChapter = chapterQueue.getOrNull(currentChapterIndex)
+
+            emitEvent(
+                "TTSNativeChapterBoundary",
+                position = currentIndex,
+                total = configuredTotal,
+                chapterIndex = currentChapterIndex,
+                chapterId = activeChapter?.chapterId,
+                message = "next",
+            )
+        }
+    }
+
+    private fun switchToChapter(targetIndex: Int): Boolean {
+        val chapter = chapterQueue.getOrNull(targetIndex) ?: return false
+
+        textToSpeech?.stop()
+        activeUtteranceId = null
+
+        currentChapterIndex = targetIndex
+        currentIndex = 0
+        textSegments = chapter.segments
+        configuredTotal = chapter.segments.size
+        currentTitle = chapter.novelName.ifBlank { "LNReader" }
+        currentSubtitle = chapter.chapterName
+        isTestPlayback = false
+        isPaused = false
+        isPlaying = true
+
+        loadCoverBitmap(chapter.coverUri)
+        updateNotification()
+
+        emitEvent(
+            "TTSNativeChapterChanged",
+            position = currentIndex,
+            total = configuredTotal,
+            chapterIndex = currentChapterIndex,
+            chapterId = chapter.chapterId,
+        )
+
+        speakCurrentSegment()
+        return true
+    }
+
     private fun advancePlayback() {
         activeUtteranceId = null
         currentIndex++
@@ -701,13 +772,11 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
                     }
 
                     override fun onSkipToPrevious() {
-                        pausePlayback()
-                        emitEvent("TTSPrev")
+                        skipToPreviousChapter()
                     }
 
                     override fun onSkipToNext() {
-                        pausePlayback()
-                        emitEvent("TTSNext")
+                        skipToNextChapter()
                     }
 
                     override fun onSeekTo(pos: Long) {

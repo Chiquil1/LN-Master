@@ -43,7 +43,7 @@ export interface PreparedTTSChapter {
   chapterText: string;
 }
 
-const DEFAULT_TTS_CHAPTER_BUFFER_SIZE = 5;
+const DEFAULT_TTS_CHAPTER_BUFFER_SIZE = 6;
 
 export default function useChapter(
   webViewRef: RefObject<WebView | null>,
@@ -203,25 +203,104 @@ export default function useChapter(
     [novel.path, novel.pluginId, novel.totalPages],
   );
 
+  const getPrevChapterForTTS = useCallback(
+    async (sourceChapter: ChapterInfo) => {
+      let prevChap = await getPrevChapter(
+        sourceChapter.novelId,
+        sourceChapter.position!,
+        sourceChapter.page ?? '',
+      );
+
+      if (prevChap) {
+        return prevChap;
+      }
+
+      const currentPage = Number(sourceChapter.page);
+
+      if (!Number.isFinite(currentPage) || currentPage <= 1) {
+        return undefined;
+      }
+
+      const prevPage = String(currentPage - 1);
+
+      try {
+        const count = await getChapterCount(sourceChapter.novelId, prevPage);
+
+        if (count === 0) {
+          const sourcePage = await fetchPage(
+            novel.pluginId,
+            novel.path,
+            prevPage,
+          );
+
+          await insertChapters(
+            sourceChapter.novelId,
+            sourcePage.chapters.map(ch => ({
+              ...ch,
+              page: prevPage,
+            })),
+          );
+        }
+
+        prevChap = await getPrevChapter(
+          sourceChapter.novelId,
+          sourceChapter.position!,
+          sourceChapter.page ?? '',
+        );
+      } catch {
+        return undefined;
+      }
+
+      return prevChap;
+    },
+    [novel.path, novel.pluginId],
+  );
+
   const prepareTTSChapterQueue = useCallback(
     async (
       maxChapters = DEFAULT_TTS_CHAPTER_BUFFER_SIZE,
     ): Promise<PreparedTTSChapter[]> => {
       const normalizedLimit = Math.max(1, Math.floor(maxChapters));
-      const preparedChapters: PreparedTTSChapter[] = [];
-      let queueChapter: ChapterInfo | undefined = chapter;
+      const queueChapters: ChapterInfo[] = [];
 
-      for (
-        let queueIndex = 0;
-        queueIndex < normalizedLimit && queueChapter;
-        queueIndex++
-      ) {
+      // Reservamos una posición para el capítulo anterior cuando exista. Así,
+      // Android puede ejecutar Previous sin depender de React/WebView.
+      if (normalizedLimit > 1) {
+        const previousChapter = await getPrevChapterForTTS(chapter);
+
+        if (previousChapter) {
+          queueChapters.push(previousChapter);
+        }
+      }
+
+      queueChapters.push(chapter);
+
+      let nextQueueChapter: ChapterInfo | undefined = chapter;
+
+      while (queueChapters.length < normalizedLimit && nextQueueChapter) {
+        nextQueueChapter = await getNextChapterForTTS(nextQueueChapter);
+
+        if (!nextQueueChapter) {
+          break;
+        }
+
+        if (!queueChapters.some(item => item.id === nextQueueChapter?.id)) {
+          queueChapters.push(nextQueueChapter);
+        }
+      }
+
+      const preparedChapters: PreparedTTSChapter[] = [];
+
+      for (const queueChapter of queueChapters) {
+        const isCurrentChapter = queueChapter.id === chapter.id;
         const cachedText = chapterTextCache.read(queueChapter.id);
         const rawText = await (cachedText ??
-          loadChapterText(queueChapter, queueIndex === 0));
+          loadChapterText(queueChapter, isCurrentChapter));
 
-        if (!rawText && queueIndex > 0) {
-          break;
+        // Un fallo de precarga de un capítulo adyacente no debe impedir que
+        // el capítulo actual ni el resto del buffer sigan disponibles.
+        if (!rawText && !isCurrentChapter) {
+          continue;
         }
 
         if (!cachedText && rawText) {
@@ -239,8 +318,6 @@ export default function useChapter(
               )
             : '',
         });
-
-        queueChapter = await getNextChapterForTTS(queueChapter);
       }
 
       return preparedChapters;
@@ -249,6 +326,7 @@ export default function useChapter(
       chapter,
       chapterTextCache,
       getNextChapterForTTS,
+      getPrevChapterForTTS,
       loadChapterText,
       novel.name,
       novel.pluginId,

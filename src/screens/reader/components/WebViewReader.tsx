@@ -108,7 +108,7 @@ type NativeTTSErrorEvent = NativeTTSProgressEvent & {
 
 const TTS_RETRY_DELAY_MS = 750;
 const TTS_MAX_RETRIES = 1;
-const TTS_CHAPTER_BUFFER_SIZE = 5;
+const TTS_CHAPTER_BUFFER_SIZE = 6;
 const TTS_MAX_SEGMENT_LENGTH = 3000;
 
 const onLogMessage = (payload: { nativeEvent: { data: string } }) => {
@@ -180,6 +180,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
   const ttsChapterIdRef = useRef<number | null>(null);
   const speechSessionRef = useRef<number>(0);
   const pendingNavigationRef = useRef<'NEXT' | 'PREV' | null>(null);
+  const pendingNativeChapterIndexRef = useRef<number | null>(null);
   const ttsRetryCountRef = useRef<number>(0);
   const ttsFallbackVoiceRef = useRef<boolean>(false);
   const ttsRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -216,6 +217,19 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
   }, [currentTTSIndex, currentTTSSegments]);
 
   useEffect(() => {
+    const nativeTransitionInProgress =
+      nativePlaybackStartedRef.current &&
+      (pendingNativeChapterIndexRef.current !== null ||
+        ttsChapterIdRef.current === chapter.id);
+
+    if (nativeTransitionInProgress) {
+      autoStartTTSRef.current = false;
+      isAutoStartingRef.current = false;
+      isTransitioningRef.current = false;
+      pendingNavigationRef.current = null;
+      return;
+    }
+
     speechSessionRef.current += 1;
     isSpeakingRef.current = false;
     isAutoStartingRef.current = false;
@@ -228,6 +242,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
     ttsFallbackVoiceRef.current = false;
     bufferedTTSQueueRef.current = [];
     ttsQueuePreparationRef.current = null;
+    pendingNativeChapterIndexRef.current = null;
     lastTTSPlaybackRef.current = null;
 
     if (ttsRetryTimerRef.current) {
@@ -259,6 +274,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       isAutoStartingRef.current = false;
       autoStartTTSRef.current = true;
       pendingNavigationRef.current = position;
+      pendingNativeChapterIndexRef.current = null;
 
       // Invalida todos los callbacks del párrafo o capítulo anterior.
       speechSessionRef.current += 1;
@@ -268,6 +284,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       nativePlaybackPausedRef.current = false;
       ttsRetryCountRef.current = 0;
       ttsFallbackVoiceRef.current = false;
+      pendingNativeChapterIndexRef.current = null;
       lastTTSPlaybackRef.current = null;
 
       if (ttsRetryTimerRef.current) {
@@ -366,6 +383,61 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
     }, 500);
   }, [chapter.id, webViewRef]);
 
+  const syncVisibleChapterToNativeQueue = useCallback(() => {
+    if (appStateRef.current !== 'active') {
+      return;
+    }
+
+    const targetIndex = pendingNativeChapterIndexRef.current;
+
+    if (targetIndex === null) {
+      return;
+    }
+
+    const queue = useTTSStore.getState().queue;
+    const targetItem = queue[targetIndex];
+
+    if (!targetItem) {
+      pendingNativeChapterIndexRef.current = null;
+      return;
+    }
+
+    if (targetItem.chapterId === chapter.id) {
+      pendingNativeChapterIndexRef.current = null;
+      return;
+    }
+
+    const visibleIndex = queue.findIndex(item => item.chapterId === chapter.id);
+
+    if (visibleIndex >= 0) {
+      const direction = targetIndex > visibleIndex ? 'NEXT' : 'PREV';
+      const adjacentChapter = direction === 'NEXT' ? nextChapter : prevChapter;
+
+      if (adjacentChapter) {
+        navigateChapter(direction);
+      }
+      return;
+    }
+
+    if (nextChapter?.id === targetItem.chapterId) {
+      navigateChapter('NEXT');
+    } else if (prevChapter?.id === targetItem.chapterId) {
+      navigateChapter('PREV');
+    }
+  }, [chapter.id, navigateChapter, nextChapter, prevChapter]);
+
+  useEffect(() => {
+    if (
+      pendingNativeChapterIndexRef.current !== null &&
+      appStateRef.current === 'active'
+    ) {
+      const timer = setTimeout(syncVisibleChapterToNativeQueue, 100);
+      return () => clearTimeout(timer);
+    }
+
+    return undefined;
+  }, [chapter.id, syncVisibleChapterToNativeQueue]);
+
   useEffect(() => {
     registerTTSWebView(webViewRef);
     return () => {
@@ -458,6 +530,67 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       requestChapterNavigation('NEXT');
     });
 
+    const chapterChangedListener = ttsMediaEmitter.addListener(
+      'TTSNativeChapterChanged',
+      (event: NativeTTSProgressEvent) => {
+        const storeState = useTTSStore.getState();
+        const queue = storeState.queue;
+
+        let nativeChapterIndex =
+          typeof event.chapterIndex === 'number' ? event.chapterIndex : -1;
+
+        if (
+          (nativeChapterIndex < 0 || nativeChapterIndex >= queue.length) &&
+          typeof event.chapterId === 'number'
+        ) {
+          nativeChapterIndex = queue.findIndex(
+            item => item.chapterId === event.chapterId,
+          );
+        }
+
+        const nativeQueueItem = queue[nativeChapterIndex];
+
+        if (!nativeQueueItem) {
+          return;
+        }
+
+        const segmentIndex =
+          typeof event.position === 'number' && event.position >= 0
+            ? Math.min(
+                event.position,
+                Math.max(nativeQueueItem.textSegments.length - 1, 0),
+              )
+            : 0;
+
+        setTTSCurrentChapterIndex(nativeChapterIndex);
+        ttsSegmentsRef.current = nativeQueueItem.textSegments;
+        ttsChapterIdRef.current = nativeQueueItem.chapterId;
+        ttsIndexRef.current = segmentIndex;
+        updateCurrentItemCurrentIndex(segmentIndex);
+
+        const currentPlayback = lastTTSPlaybackRef.current;
+        if (currentPlayback) {
+          lastTTSPlaybackRef.current = {
+            ...currentPlayback,
+            chapterIndex: nativeChapterIndex,
+            segmentIndex,
+          };
+        }
+
+        nativePlaybackStartedRef.current = true;
+        nativePlaybackPausedRef.current = false;
+        isSpeakingRef.current = true;
+        isTTSReadingRef.current = true;
+        setTTSIsPlaying(true);
+
+        pendingNativeChapterIndexRef.current = nativeChapterIndex;
+
+        if (appStateRef.current === 'active') {
+          setTimeout(syncVisibleChapterToNativeQueue, 50);
+        }
+      },
+    );
+
     const seekToListener = ttsMediaEmitter.addListener(
       'TTSSeekTo',
       (event: { position: number }) => {
@@ -532,12 +665,19 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
             : nativeQueueItem.textSegments.length,
         );
 
-        // Android puede avanzar mientras el WebView sigue mostrando otro capítulo.
-        // Solo sincronizamos resaltado/scroll cuando el DOM visible corresponde
-        // al mismo capítulo que el servicio nativo está reproduciendo.
+        // Android puede cambiar de capítulo sin depender del WebView.
+        // Si la pantalla está mostrando otro capítulo, dejamos pendiente la
+        // navegación visual; el audio nativo continúa sin interrupciones.
         if (nativeQueueItem.chapterId !== chapter.id) {
+          pendingNativeChapterIndexRef.current = nativeChapterIndex;
+
+          if (appStateRef.current === 'active') {
+            setTimeout(syncVisibleChapterToNativeQueue, 50);
+          }
           return;
         }
+
+        pendingNativeChapterIndexRef.current = null;
 
         webViewRef.current?.injectJavaScript(`
           (function() {
@@ -802,6 +942,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       rewindListener.remove();
       prevListener.remove();
       nextListener.remove();
+      chapterChangedListener.remove();
       seekToListener.remove();
       segmentListener.remove();
       queueFinishedListener.remove();
@@ -817,6 +958,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
     requestChapterNavigation,
     setTTSCurrentChapterIndex,
     setTTSIsPlaying,
+    syncVisibleChapterToNativeQueue,
     updateCurrentItemCurrentIndex,
     webViewRef,
   ]);
@@ -920,6 +1062,11 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
         return;
       }
 
+      if (pendingNativeChapterIndexRef.current !== null) {
+        setTimeout(syncVisibleChapterToNativeQueue, 100);
+        return;
+      }
+
       const pendingNavigation = pendingNavigationRef.current;
       if (pendingNavigation) {
         setTimeout(() => {
@@ -940,7 +1087,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
         return;
       }
 
-      if (isTTSReadingRef.current) {
+      if (isTTSReadingRef.current && ttsChapterIdRef.current === chapter.id) {
         const index = ttsIndexRef.current;
         webViewRef.current?.injectJavaScript(`
           if (window.tts && window.tts.allReadableElements) {
@@ -965,7 +1112,13 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
     });
 
     return () => subscription.remove();
-  }, [navigateChapter, tryAutoStartTTS, webViewRef]);
+  }, [
+    chapter.id,
+    navigateChapter,
+    syncVisibleChapterToNativeQueue,
+    tryAutoStartTTS,
+    webViewRef,
+  ]);
 
   // Función para limpiar texto antes de enviarlo al TTS
   const cleanTextForTTS = (text: string): string => {
@@ -1363,6 +1516,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       Math.max(activeSegments.length - 1, 0),
     );
 
+    setTTSCurrentChapterIndex(nativeChapterIndex);
     ttsIndexRef.current = normalizedSegmentIndex;
     isSpeakingRef.current = true;
     nativePlaybackStartedRef.current = true;
@@ -1502,6 +1656,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
             ttsChapterIdRef.current = chapter.id;
             ttsRetryCountRef.current = 0;
             ttsFallbackVoiceRef.current = false;
+            pendingNativeChapterIndexRef.current = null;
             lastTTSPlaybackRef.current = null;
 
             const currentQueueItem = {
@@ -1531,8 +1686,16 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
                 const preparedQueue =
                   bufferedQueue.length > 0 ? bufferedQueue : [currentQueueItem];
 
+                const preparedCurrentIndex = Math.max(
+                  preparedQueue.findIndex(
+                    item => item.chapterId === chapter.id,
+                  ),
+                  0,
+                );
+
                 bufferedTTSQueueRef.current = preparedQueue;
-                setTTSQueue(preparedQueue, 0);
+                setTTSQueue(preparedQueue, preparedCurrentIndex);
+                setTTSCurrentChapterIndex(preparedCurrentIndex);
 
                 return preparedQueue;
               })
@@ -1663,6 +1826,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
             isSpeakingRef.current = false;
             ttsRetryCountRef.current = 0;
             ttsFallbackVoiceRef.current = false;
+            pendingNativeChapterIndexRef.current = null;
             lastTTSPlaybackRef.current = null;
 
             if (ttsRetryTimerRef.current) {
