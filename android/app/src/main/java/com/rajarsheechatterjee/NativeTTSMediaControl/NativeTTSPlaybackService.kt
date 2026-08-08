@@ -65,6 +65,7 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
         const val EXTRA_TEXT_SEGMENTS = "textSegments"
         const val EXTRA_CHAPTERS_JSON = "chaptersJson"
         const val EXTRA_CHAPTER_INDEX = "chapterIndex"
+        const val EXTRA_CHAPTER_ID = "chapterId"
         const val EXTRA_VOICE_IDENTIFIER = "voiceIdentifier"
         const val EXTRA_LANGUAGE = "language"
         const val EXTRA_RATE = "rate"
@@ -203,7 +204,16 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
                         isPlaying &&
                         !isTestPlayback
                     ) {
-                        emitEvent("TTSNativeSegment", position = currentIndex)
+                        val activeChapter = chapterQueue.getOrNull(currentChapterIndex)
+
+                        emitEvent(
+                            "TTSNativeSegment",
+                            position = currentIndex,
+                            total = configuredTotal,
+                            chapterIndex =
+                                if (activeChapter != null) currentChapterIndex else null,
+                            chapterId = activeChapter?.chapterId,
+                        )
                     }
                 }
 
@@ -506,9 +516,15 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
             textToSpeech?.stop()
             updateNotification()
 
+            val activeChapter = chapterQueue.getOrNull(currentChapterIndex)
+
             emitEvent(
                 "TTSNativeError",
                 position = currentIndex,
+                total = configuredTotal,
+                chapterIndex =
+                    if (activeChapter != null) currentChapterIndex else null,
+                chapterId = activeChapter?.chapterId,
                 message = ttsErrorMessage(errorCode),
                 errorCode = errorCode,
                 errorKind = ttsErrorKind(errorCode),
@@ -579,7 +595,16 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
             return
         }
 
-        emitEvent("TTSNativeQueueFinished", position = configuredTotal)
+        val activeChapter = chapterQueue.getOrNull(currentChapterIndex)
+
+        emitEvent(
+            "TTSNativeQueueFinished",
+            position = configuredTotal,
+            total = configuredTotal,
+            chapterIndex =
+                if (activeChapter != null) currentChapterIndex else null,
+            chapterId = activeChapter?.chapterId,
+        )
     }
 
     private fun pausePlayback() {
@@ -892,6 +917,9 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
     private fun emitEvent(
         eventName: String,
         position: Int? = null,
+        total: Int? = null,
+        chapterIndex: Int? = null,
+        chapterId: Long? = null,
         message: String? = null,
         errorCode: Int? = null,
         errorKind: String? = null,
@@ -900,6 +928,9 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
         val intent = Intent(EVENT_ACTION).setPackage(packageName).apply {
             putExtra(EXTRA_EVENT_NAME, eventName)
             position?.let { putExtra(EXTRA_POSITION, it) }
+            total?.let { putExtra(EXTRA_TOTAL, it) }
+            chapterIndex?.let { putExtra(EXTRA_CHAPTER_INDEX, it) }
+            chapterId?.let { putExtra(EXTRA_CHAPTER_ID, it) }
             message?.let { putExtra(EXTRA_MESSAGE, it) }
             errorCode?.let { putExtra(EXTRA_ERROR_CODE, it) }
             errorKind?.let { putExtra(EXTRA_ERROR_KIND, it) }

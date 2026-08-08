@@ -63,6 +63,36 @@ class NativeTTSMediaControl(
                 )
             }
 
+            if (intent.hasExtra(NativeTTSPlaybackService.EXTRA_TOTAL)) {
+                params.putInt(
+                    "total",
+                    intent.getIntExtra(
+                        NativeTTSPlaybackService.EXTRA_TOTAL,
+                        0,
+                    ),
+                )
+            }
+
+            if (intent.hasExtra(NativeTTSPlaybackService.EXTRA_CHAPTER_INDEX)) {
+                params.putInt(
+                    "chapterIndex",
+                    intent.getIntExtra(
+                        NativeTTSPlaybackService.EXTRA_CHAPTER_INDEX,
+                        0,
+                    ),
+                )
+            }
+
+            if (intent.hasExtra(NativeTTSPlaybackService.EXTRA_CHAPTER_ID)) {
+                params.putDouble(
+                    "chapterId",
+                    intent.getLongExtra(
+                        NativeTTSPlaybackService.EXTRA_CHAPTER_ID,
+                        -1L,
+                    ).toDouble(),
+                )
+            }
+
             if (intent.hasExtra(NativeTTSPlaybackService.EXTRA_MESSAGE)) {
                 params.putString(
                     "message",

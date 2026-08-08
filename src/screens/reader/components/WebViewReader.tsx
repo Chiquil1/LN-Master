@@ -92,8 +92,14 @@ type NativeTTSErrorKind =
   | 'invalid_request'
   | 'generic';
 
-type NativeTTSErrorEvent = {
+type NativeTTSProgressEvent = {
   position?: number;
+  total?: number;
+  chapterIndex?: number;
+  chapterId?: number;
+};
+
+type NativeTTSErrorEvent = NativeTTSProgressEvent & {
   message?: string;
   code?: number;
   kind?: NativeTTSErrorKind;
@@ -465,24 +471,73 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
 
     const segmentListener = ttsMediaEmitter.addListener(
       'TTSNativeSegment',
-      (event: { position?: number }) => {
+      (event: NativeTTSProgressEvent) => {
+        const storeState = useTTSStore.getState();
+        const queue = storeState.queue;
+
+        let nativeChapterIndex =
+          typeof event.chapterIndex === 'number' ? event.chapterIndex : -1;
+
+        if (
+          (nativeChapterIndex < 0 || nativeChapterIndex >= queue.length) &&
+          typeof event.chapterId === 'number'
+        ) {
+          nativeChapterIndex = queue.findIndex(
+            item => item.chapterId === event.chapterId,
+          );
+        }
+
+        if (nativeChapterIndex < 0 || nativeChapterIndex >= queue.length) {
+          nativeChapterIndex = storeState.currentChapterIndex;
+        }
+
+        const nativeQueueItem = queue[nativeChapterIndex];
         const index = event.position;
 
         if (
+          !nativeQueueItem ||
           typeof index !== 'number' ||
           index < 0 ||
-          index >= ttsSegmentsRef.current.length
+          index >= nativeQueueItem.textSegments.length
         ) {
           return;
+        }
+
+        setTTSCurrentChapterIndex(nativeChapterIndex);
+        ttsSegmentsRef.current = nativeQueueItem.textSegments;
+        ttsChapterIdRef.current = nativeQueueItem.chapterId;
+        ttsIndexRef.current = index;
+        updateCurrentItemCurrentIndex(index);
+
+        const currentPlayback = lastTTSPlaybackRef.current;
+        if (currentPlayback) {
+          lastTTSPlaybackRef.current = {
+            ...currentPlayback,
+            chapterIndex: nativeChapterIndex,
+            segmentIndex: index,
+          };
         }
 
         nativePlaybackStartedRef.current = true;
         nativePlaybackPausedRef.current = false;
         isSpeakingRef.current = true;
+        isTTSReadingRef.current = true;
         ttsRetryCountRef.current = 0;
-        ttsIndexRef.current = index;
-        updateCurrentItemCurrentIndex(index);
-        updateTTSProgress(index, ttsSegmentsRef.current.length);
+        setTTSIsPlaying(true);
+
+        updateTTSProgress(
+          index,
+          typeof event.total === 'number' && event.total > 0
+            ? event.total
+            : nativeQueueItem.textSegments.length,
+        );
+
+        // Android puede avanzar mientras el WebView sigue mostrando otro capítulo.
+        // Solo sincronizamos resaltado/scroll cuando el DOM visible corresponde
+        // al mismo capítulo que el servicio nativo está reproduciendo.
+        if (nativeQueueItem.chapterId !== chapter.id) {
+          return;
+        }
 
         webViewRef.current?.injectJavaScript(`
           (function() {
@@ -544,13 +599,49 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
         const isNetworkError =
           errorKind === 'network' || errorKind === 'network_timeout';
 
+        const storeState = useTTSStore.getState();
+        const queue = storeState.queue;
+
+        let nativeChapterIndex =
+          typeof event.chapterIndex === 'number' ? event.chapterIndex : -1;
+
         if (
-          typeof event.position === 'number' &&
-          event.position >= 0 &&
-          event.position < ttsSegmentsRef.current.length
+          (nativeChapterIndex < 0 || nativeChapterIndex >= queue.length) &&
+          typeof event.chapterId === 'number'
         ) {
-          ttsIndexRef.current = event.position;
-          updateCurrentItemCurrentIndex(event.position);
+          nativeChapterIndex = queue.findIndex(
+            item => item.chapterId === event.chapterId,
+          );
+        }
+
+        if (nativeChapterIndex < 0 || nativeChapterIndex >= queue.length) {
+          nativeChapterIndex = storeState.currentChapterIndex;
+        }
+
+        const nativeQueueItem = queue[nativeChapterIndex];
+
+        if (nativeQueueItem) {
+          setTTSCurrentChapterIndex(nativeChapterIndex);
+          ttsSegmentsRef.current = nativeQueueItem.textSegments;
+          ttsChapterIdRef.current = nativeQueueItem.chapterId;
+
+          if (
+            typeof event.position === 'number' &&
+            event.position >= 0 &&
+            event.position < nativeQueueItem.textSegments.length
+          ) {
+            ttsIndexRef.current = event.position;
+            updateCurrentItemCurrentIndex(event.position);
+          }
+
+          const currentPlayback = lastTTSPlaybackRef.current;
+          if (currentPlayback) {
+            lastTTSPlaybackRef.current = {
+              ...currentPlayback,
+              chapterIndex: nativeChapterIndex,
+              segmentIndex: ttsIndexRef.current,
+            };
+          }
         }
 
         console.warn('[TTS] Error del motor nativo:', {
@@ -558,6 +649,8 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
           code: event.code,
           kind: errorKind,
           requiresNetwork: event.requiresNetwork,
+          chapterIndex: event.chapterIndex,
+          chapterId: event.chapterId,
           index: ttsIndexRef.current,
           retry: ttsRetryCountRef.current,
           fallbackVoice: ttsFallbackVoiceRef.current,
@@ -715,6 +808,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       nativeErrorListener.remove();
     };
   }, [
+    chapter.id,
     chapter.name,
     clearTTSQueue,
     nextChapter,
