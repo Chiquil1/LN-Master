@@ -38,6 +38,13 @@ import { useNovelActions } from '@screens/novel/NovelContext';
 
 const emmiter = new NativeEventEmitter(NativeVolumeButtonListener);
 
+export interface PreparedTTSChapter {
+  chapter: ChapterInfo;
+  chapterText: string;
+}
+
+const DEFAULT_TTS_CHAPTER_BUFFER_SIZE = 5;
+
 export default function useChapter(
   webViewRef: RefObject<WebView | null>,
   initialChapter: ChapterInfo,
@@ -115,23 +122,137 @@ export default function useChapter(
   }, [chapter.id]);
 
   const loadChapterText = useCallback(
-    async (id: number, path: string) => {
-      const filePath = `${NOVEL_STORAGE}/${novel.pluginId}/${chapter.novelId}/${id}/index.html`;
+    async (targetChapter: ChapterInfo, reportError = true) => {
+      const filePath = `${NOVEL_STORAGE}/${novel.pluginId}/${targetChapter.novelId}/${targetChapter.id}/index.html`;
       let text = '';
 
       if (NativeFile.exists(filePath)) {
         text = NativeFile.readFile(filePath);
       } else {
-        await fetchChapter(novel.pluginId, path)
+        await fetchChapter(novel.pluginId, targetChapter.path)
           .then(res => {
             text = res;
           })
-          .catch(e => setError(e.message));
+          .catch(e => {
+            if (reportError) {
+              setError(e.message);
+            }
+          });
       }
 
       return text;
     },
-    [chapter.novelId, novel.pluginId],
+    [novel.pluginId],
+  );
+
+  const getNextChapterForTTS = useCallback(
+    async (sourceChapter: ChapterInfo) => {
+      let nextChap = await getNextChapter(
+        sourceChapter.novelId,
+        sourceChapter.position!,
+        sourceChapter.page ?? '',
+      );
+
+      if (nextChap) {
+        return nextChap;
+      }
+
+      const totalPages = novel.totalPages ?? 0;
+      const currentPage = Number(sourceChapter.page);
+
+      if (
+        totalPages <= 0 ||
+        !Number.isFinite(currentPage) ||
+        currentPage >= totalPages
+      ) {
+        return undefined;
+      }
+
+      const nextPage = String(currentPage + 1);
+
+      try {
+        const count = await getChapterCount(sourceChapter.novelId, nextPage);
+
+        if (count === 0) {
+          const sourcePage = await fetchPage(
+            novel.pluginId,
+            novel.path,
+            nextPage,
+          );
+
+          await insertChapters(
+            sourceChapter.novelId,
+            sourcePage.chapters.map(ch => ({
+              ...ch,
+              page: nextPage,
+            })),
+          );
+        }
+
+        nextChap = await getNextChapter(
+          sourceChapter.novelId,
+          sourceChapter.position!,
+          sourceChapter.page ?? '',
+        );
+      } catch {
+        return undefined;
+      }
+
+      return nextChap;
+    },
+    [novel.path, novel.pluginId, novel.totalPages],
+  );
+
+  const prepareTTSChapterQueue = useCallback(
+    async (
+      maxChapters = DEFAULT_TTS_CHAPTER_BUFFER_SIZE,
+    ): Promise<PreparedTTSChapter[]> => {
+      const normalizedLimit = Math.max(1, Math.floor(maxChapters));
+      const preparedChapters: PreparedTTSChapter[] = [];
+      let queueChapter: ChapterInfo | undefined = chapter;
+
+      for (
+        let queueIndex = 0;
+        queueIndex < normalizedLimit && queueChapter;
+        queueIndex++
+      ) {
+        const cachedText = chapterTextCache.read(queueChapter.id);
+        const rawText = await (cachedText ??
+          loadChapterText(queueChapter, queueIndex === 0));
+
+        if (!rawText && queueIndex > 0) {
+          break;
+        }
+
+        if (!cachedText && rawText) {
+          chapterTextCache.write(queueChapter.id, rawText);
+        }
+
+        preparedChapters.push({
+          chapter: queueChapter,
+          chapterText: rawText
+            ? sanitizeChapterText(
+                novel.pluginId,
+                novel.name,
+                queueChapter.name,
+                rawText,
+              )
+            : '',
+        });
+
+        queueChapter = await getNextChapterForTTS(queueChapter);
+      }
+
+      return preparedChapters;
+    },
+    [
+      chapter,
+      chapterTextCache,
+      getNextChapterForTTS,
+      loadChapterText,
+      novel.name,
+      novel.pluginId,
+    ],
   );
 
   const getChapter = useCallback(
@@ -143,7 +264,7 @@ export default function useChapter(
 
         const chap = dbChapter ?? navChapter ?? chapter;
         const cachedText = chapterTextCache.read(chap.id);
-        const text = cachedText ?? loadChapterText(chap.id, chap.path);
+        const text = cachedText ?? loadChapterText(chap);
 
         const [nextChapResult, prevChapResult, awaitedText] = await Promise.all(
           [
@@ -221,10 +342,7 @@ export default function useChapter(
         }
 
         if (nextChap && !chapterTextCache.read(nextChap.id)) {
-          chapterTextCache.write(
-            nextChap.id,
-            loadChapterText(nextChap.id, nextChap.path),
-          );
+          chapterTextCache.write(nextChap.id, loadChapterText(nextChap));
         }
 
         if (!cachedText) {
@@ -396,6 +514,7 @@ export default function useChapter(
       setChapter,
       setLoading,
       getChapter,
+      prepareTTSChapterQueue,
     }),
     [
       hidden,
@@ -413,6 +532,7 @@ export default function useChapter(
       setChapter,
       setLoading,
       getChapter,
+      prepareTTSChapterQueue,
     ],
   );
 }

@@ -14,6 +14,7 @@ import {
 } from 'react-native';
 import WebView from 'react-native-webview';
 import color from 'color';
+import { load } from 'cheerio';
 
 import { useTheme } from '@hooks/persisted';
 import { getString } from '@strings/translations';
@@ -84,6 +85,8 @@ type NativeTTSErrorEvent = {
 
 const TTS_RETRY_DELAY_MS = 750;
 const TTS_MAX_RETRIES = 1;
+const TTS_CHAPTER_BUFFER_SIZE = 5;
+const TTS_MAX_SEGMENT_LENGTH = 3000;
 
 const onLogMessage = (payload: { nativeEvent: { data: string } }) => {
   const dataPayload = JSON.parse(payload.nativeEvent.data);
@@ -112,6 +115,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
     nextChapter,
     prevChapter,
     webViewRef,
+    prepareTTSChapterQueue,
   } = useChapterContext();
   const theme = useTheme();
   const [readerSettings, setReaderSettings] = useState<ChapterReaderSettings>(
@@ -1002,6 +1006,148 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
     return cleaned;
   };
 
+  const splitLongTTSText = (text: string): string[] => {
+    if (text.length <= TTS_MAX_SEGMENT_LENGTH) {
+      return text ? [text] : [];
+    }
+
+    const chunks: string[] = [];
+    let remaining = text;
+
+    while (remaining.length > TTS_MAX_SEGMENT_LENGTH) {
+      const window = remaining.slice(0, TTS_MAX_SEGMENT_LENGTH);
+      const punctuationBoundary = Math.max(
+        window.lastIndexOf('. '),
+        window.lastIndexOf('! '),
+        window.lastIndexOf('? '),
+        window.lastIndexOf('; '),
+        window.lastIndexOf(': '),
+      );
+      const whitespaceBoundary = window.lastIndexOf(' ');
+      const minimumUsefulBoundary = Math.floor(TTS_MAX_SEGMENT_LENGTH * 0.55);
+
+      let splitAt = TTS_MAX_SEGMENT_LENGTH;
+
+      if (punctuationBoundary >= minimumUsefulBoundary) {
+        splitAt = punctuationBoundary + 1;
+      } else if (whitespaceBoundary >= minimumUsefulBoundary) {
+        splitAt = whitespaceBoundary;
+      }
+
+      const chunk = remaining.slice(0, splitAt).trim();
+
+      if (chunk) {
+        chunks.push(chunk);
+      }
+
+      remaining = remaining.slice(splitAt).trim();
+    }
+
+    if (remaining) {
+      chunks.push(remaining);
+    }
+
+    return chunks;
+  };
+
+  const extractTTSChapterSegments = (chapterHtml: string): string[] => {
+    if (!chapterHtml.trim()) {
+      return [];
+    }
+
+    const $ = load(
+      `<div id="lnreader-tts-root">${chapterHtml}</div>`,
+      null,
+      false,
+    );
+    const root = $('#lnreader-tts-root');
+    const readableNodeNames = new Set([
+      '#TEXT',
+      'B',
+      'I',
+      'SPAN',
+      'EM',
+      'BR',
+      'STRONG',
+      'A',
+    ]);
+    const segments: string[] = [];
+
+    root.find('*').each((_index, element) => {
+      const nodeName = String($(element).prop('tagName') || '').toUpperCase();
+
+      if (!nodeName) {
+        return;
+      }
+
+      if (nodeName !== 'SPAN' && readableNodeNames.has(nodeName)) {
+        return;
+      }
+
+      const children = $(element).contents().toArray();
+
+      if (children.length === 0) {
+        return;
+      }
+
+      const isReadable = children.every(child => {
+        if (child.type === 'text') {
+          return true;
+        }
+
+        const childNodeName = String(
+          $(child).prop('tagName') || '',
+        ).toUpperCase();
+
+        return readableNodeNames.has(childNodeName);
+      });
+
+      if (!isReadable) {
+        return;
+      }
+
+      const cleanedText = cleanTextForTTS($(element).text());
+
+      splitLongTTSText(cleanedText).forEach(segment => {
+        if (segment.length >= 2) {
+          segments.push(segment);
+        }
+      });
+    });
+
+    if (segments.length > 0) {
+      return segments;
+    }
+
+    return splitLongTTSText(cleanTextForTTS(root.text()));
+  };
+
+  const prepareBufferedTTSQueue = async (
+    currentSegments: string[],
+    initialIndex: number,
+  ) => {
+    const preparedChapters = await prepareTTSChapterQueue(
+      TTS_CHAPTER_BUFFER_SIZE,
+    );
+
+    return preparedChapters
+      .map(preparedChapter => {
+        const isCurrentChapter = preparedChapter.chapter.id === chapter.id;
+        const textSegments = isCurrentChapter
+          ? currentSegments
+          : extractTTSChapterSegments(preparedChapter.chapterText);
+
+        return {
+          chapterId: preparedChapter.chapter.id,
+          chapterName: preparedChapter.chapter.name,
+          novelId: preparedChapter.chapter.novelId,
+          textSegments,
+          currentIndex: isCurrentChapter ? initialIndex : 0,
+        };
+      })
+      .filter(item => item.textSegments.length > 0);
+  };
+
   const speakText = (
     text: string,
     index = ttsIndexRef.current,
@@ -1182,16 +1328,36 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
             ttsFallbackVoiceRef.current = false;
             lastTTSPlaybackRef.current = null;
 
-            setTTSQueue([
-              {
-                chapterId: chapter.id,
-                chapterName: chapter.name,
-                novelId: novel.id,
-                textSegments: queue,
-                currentIndex: initialIndex,
-              },
-            ]);
+            const currentQueueItem = {
+              chapterId: chapter.id,
+              chapterName: chapter.name,
+              novelId: novel.id,
+              textSegments: queue,
+              currentIndex: initialIndex,
+            };
+
+            // Mantener el capítulo visible disponible inmediatamente para no
+            // retrasar el inicio del TTS mientras se precargan los siguientes.
+            setTTSQueue([currentQueueItem], 0);
             setTTSCurrentChapterIndex(0);
+
+            prepareBufferedTTSQueue(queue, initialIndex)
+              .then(bufferedQueue => {
+                if (
+                  ttsChapterIdRef.current !== chapter.id ||
+                  bufferedQueue.length === 0
+                ) {
+                  return;
+                }
+
+                setTTSQueue(bufferedQueue, 0);
+              })
+              .catch(error => {
+                console.warn(
+                  '[TTS] No se pudo preparar la cola de capítulos:',
+                  error,
+                );
+              });
 
             setTimeout(() => {
               webViewRef.current?.injectJavaScript(`
