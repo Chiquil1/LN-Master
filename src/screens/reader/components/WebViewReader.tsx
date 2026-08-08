@@ -1617,7 +1617,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       const refillPromise = refillNativeQueueAtBoundary(event);
       nativeBoundaryRefillPromiseRef.current = refillPromise;
 
-      void refillPromise.finally(() => {
+      refillPromise.finally(() => {
         if (nativeBoundaryRefillPromiseRef.current === refillPromise) {
           nativeBoundaryRefillPromiseRef.current = null;
         }
