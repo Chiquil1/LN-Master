@@ -21,6 +21,16 @@ export interface Spec extends TurboModule {
     pitch: number,
   ): void;
 
+  startChapterQueue(
+    chaptersJson: string,
+    startChapterIndex: number,
+    startSegmentIndex: number,
+    voiceIdentifier: string,
+    language: string,
+    rate: number,
+    pitch: number,
+  ): void;
+
   pausePlayback(): void;
 
   resumePlayback(): void;

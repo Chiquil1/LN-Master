@@ -28,6 +28,7 @@ import com.rajarsheechatterjee.LNReader.R
 import java.io.File
 import java.net.URL
 import java.util.Locale
+import org.json.JSONArray
 
 /** Foreground service that owns the real reader TTS lifecycle on Android. */
 class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
@@ -37,6 +38,8 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
             "com.rajarsheechatterjee.LNReader.nativeTTS.CONFIGURE"
         const val ACTION_START_PLAYBACK =
             "com.rajarsheechatterjee.LNReader.nativeTTS.START_PLAYBACK"
+        const val ACTION_START_CHAPTER_QUEUE =
+            "com.rajarsheechatterjee.LNReader.nativeTTS.START_CHAPTER_QUEUE"
         const val ACTION_PAUSE = "com.rajarsheechatterjee.LNReader.nativeTTS.PAUSE"
         const val ACTION_RESUME = "com.rajarsheechatterjee.LNReader.nativeTTS.RESUME"
         const val ACTION_STOP = "com.rajarsheechatterjee.LNReader.nativeTTS.STOP"
@@ -60,6 +63,8 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
         const val EXTRA_COVER_URI = "coverUri"
         const val EXTRA_IS_PLAYING = "isPlaying"
         const val EXTRA_TEXT_SEGMENTS = "textSegments"
+        const val EXTRA_CHAPTERS_JSON = "chaptersJson"
+        const val EXTRA_CHAPTER_INDEX = "chapterIndex"
         const val EXTRA_VOICE_IDENTIFIER = "voiceIdentifier"
         const val EXTRA_LANGUAGE = "language"
         const val EXTRA_RATE = "rate"
@@ -84,6 +89,8 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
     private var currentTitle = "LNReader"
     private var currentSubtitle = ""
     private var textSegments: List<String> = emptyList()
+    private var chapterQueue: List<TTSChapter> = emptyList()
+    private var currentChapterIndex = 0
     private var currentIndex = 0
     private var configuredTotal = 0
     private var isPlaying = false
@@ -91,6 +98,7 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
     private var activeUtteranceId: String? = null
     private var utteranceSequence = 0L
     private var pendingRequest: PlaybackRequest? = null
+    private var pendingChapterQueueRequest: ChapterQueueRequest? = null
     private var isTestPlayback = false
     private var activeVoiceRequiresNetwork = false
 
@@ -102,6 +110,24 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
         val rate: Float,
         val pitch: Float,
         val isTest: Boolean,
+    )
+
+    private data class TTSChapter(
+        val chapterId: Long,
+        val chapterName: String,
+        val novelName: String,
+        val coverUri: String,
+        val segments: List<String>,
+    )
+
+    private data class ChapterQueueRequest(
+        val chapters: List<TTSChapter>,
+        val startChapterIndex: Int,
+        val startSegmentIndex: Int,
+        val voiceIdentifier: String,
+        val language: String,
+        val rate: Float,
+        val pitch: Float,
     )
 
     override fun onCreate() {
@@ -122,6 +148,7 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
         when (intent?.action) {
             ACTION_CONFIGURE -> configure(intent)
             ACTION_START_PLAYBACK -> startPlayback(intent)
+            ACTION_START_CHAPTER_QUEUE -> startChapterQueue(intent)
             ACTION_PAUSE -> pausePlayback()
             ACTION_RESUME -> resumePlayback()
             ACTION_STOP -> stopPlayback(stopService = true)
@@ -208,6 +235,12 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
             },
         )
 
+        pendingChapterQueueRequest?.let {
+            pendingChapterQueueRequest = null
+            applyChapterQueueRequest(it)
+            return
+        }
+
         pendingRequest?.let {
             pendingRequest = null
             applyPlaybackRequest(it)
@@ -254,9 +287,137 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
         applyPlaybackRequest(request)
     }
 
+    private fun startChapterQueue(intent: Intent) {
+        val chaptersJson = intent.getStringExtra(EXTRA_CHAPTERS_JSON).orEmpty()
+
+        val chapters =
+            try {
+                parseChapterQueue(chaptersJson)
+            } catch (_: Exception) {
+                emptyList()
+            }
+
+        if (chapters.isEmpty()) {
+            emitEvent(
+                "TTSNativeError",
+                message = "No se pudo preparar la cola nativa de capítulos",
+            )
+            return
+        }
+
+        val request =
+            ChapterQueueRequest(
+                chapters = chapters,
+                startChapterIndex = intent.getIntExtra(EXTRA_CHAPTER_INDEX, 0),
+                startSegmentIndex = intent.getIntExtra(EXTRA_POSITION, 0),
+                voiceIdentifier =
+                    intent.getStringExtra(EXTRA_VOICE_IDENTIFIER).orEmpty(),
+                language = intent.getStringExtra(EXTRA_LANGUAGE).orEmpty(),
+                rate = intent.getFloatExtra(EXTRA_RATE, 1f),
+                pitch = intent.getFloatExtra(EXTRA_PITCH, 1f),
+            )
+
+        pendingRequest = null
+
+        if (!isTtsReady) {
+            pendingChapterQueueRequest = request
+            return
+        }
+
+        applyChapterQueueRequest(request)
+    }
+
+    private fun parseChapterQueue(chaptersJson: String): List<TTSChapter> {
+        if (chaptersJson.isBlank()) {
+            return emptyList()
+        }
+
+        val jsonChapters = JSONArray(chaptersJson)
+        val chapters = mutableListOf<TTSChapter>()
+
+        for (chapterIndex in 0 until jsonChapters.length()) {
+            val jsonChapter = jsonChapters.optJSONObject(chapterIndex) ?: continue
+            val jsonSegments = jsonChapter.optJSONArray("segments") ?: continue
+            val segments = mutableListOf<String>()
+
+            for (segmentIndex in 0 until jsonSegments.length()) {
+                val segment = jsonSegments.optString(segmentIndex).trim()
+
+                if (segment.isNotEmpty()) {
+                    segments.add(segment)
+                }
+            }
+
+            if (segments.isEmpty()) {
+                continue
+            }
+
+            chapters.add(
+                TTSChapter(
+                    chapterId = jsonChapter.optLong("chapterId", -1L),
+                    chapterName =
+                        jsonChapter.optString("chapterName", "Capítulo"),
+                    novelName =
+                        jsonChapter.optString("novelName", "LNReader"),
+                    coverUri = jsonChapter.optString("coverUri", ""),
+                    segments = segments,
+                ),
+            )
+        }
+
+        return chapters
+    }
+
+    private fun applyChapterQueueRequest(request: ChapterQueueRequest) {
+        textToSpeech?.stop()
+        activeUtteranceId = null
+        pendingRequest = null
+        pendingChapterQueueRequest = null
+
+        chapterQueue = request.chapters
+        currentChapterIndex =
+            request.startChapterIndex.coerceIn(0, chapterQueue.lastIndex)
+
+        val chapter = chapterQueue[currentChapterIndex]
+
+        currentTitle = chapter.novelName.ifBlank { "LNReader" }
+        currentSubtitle = chapter.chapterName
+        loadCoverBitmap(chapter.coverUri)
+
+        textSegments = chapter.segments
+        configuredTotal = chapter.segments.size
+        currentIndex =
+            request.startSegmentIndex.coerceIn(
+                0,
+                chapter.segments.lastIndex,
+            )
+
+        isPaused = false
+        isPlaying = true
+        isTestPlayback = false
+
+        configureVoice(
+            PlaybackRequest(
+                segments = chapter.segments,
+                startIndex = currentIndex,
+                voiceIdentifier = request.voiceIdentifier,
+                language = request.language,
+                rate = request.rate,
+                pitch = request.pitch,
+                isTest = false,
+            ),
+        )
+
+        updateNotification()
+        speakCurrentSegment()
+    }
+
     private fun applyPlaybackRequest(request: PlaybackRequest) {
         textToSpeech?.stop()
         activeUtteranceId = null
+        pendingChapterQueueRequest = null
+        chapterQueue = emptyList()
+        currentChapterIndex = 0
         textSegments = request.segments
         configuredTotal = request.segments.size
         currentIndex = request.startIndex.coerceIn(0, request.segments.lastIndex)
@@ -473,7 +634,10 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
 
     private fun stopPlayback(stopService: Boolean) {
         pendingRequest = null
+        pendingChapterQueueRequest = null
         textSegments = emptyList()
+        chapterQueue = emptyList()
+        currentChapterIndex = 0
         currentIndex = 0
         configuredTotal = 0
         activeUtteranceId = null

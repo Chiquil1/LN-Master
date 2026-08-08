@@ -380,6 +380,75 @@ class NativeTTSMediaControl(
         )
     }
 
+    override fun startChapterQueue(
+        chaptersJson: String,
+        startChapterIndex: Double,
+        startSegmentIndex: Double,
+        voiceIdentifier: String,
+        language: String,
+        rate: Double,
+        pitch: Double,
+    ) {
+        try {
+            val chapters = JSONArray(chaptersJson)
+
+            if (chapters.length() == 0) {
+                sendEvent(
+                    "TTSNativeError",
+                    Arguments.createMap().apply {
+                        putString("message", "La cola de capítulos está vacía")
+                    },
+                )
+                return
+            }
+        } catch (_: Exception) {
+            sendEvent(
+                "TTSNativeError",
+                Arguments.createMap().apply {
+                    putString("message", "No se pudo preparar la cola de capítulos")
+                },
+            )
+            return
+        }
+
+        serviceActive = true
+
+        startForegroundService(
+            foregroundIntent(
+                NativeTTSPlaybackService.ACTION_START_CHAPTER_QUEUE,
+            ).apply {
+                putExtra(
+                    NativeTTSPlaybackService.EXTRA_CHAPTERS_JSON,
+                    chaptersJson,
+                )
+                putExtra(
+                    NativeTTSPlaybackService.EXTRA_CHAPTER_INDEX,
+                    startChapterIndex.toInt(),
+                )
+                putExtra(
+                    NativeTTSPlaybackService.EXTRA_POSITION,
+                    startSegmentIndex.toInt(),
+                )
+                putExtra(
+                    NativeTTSPlaybackService.EXTRA_VOICE_IDENTIFIER,
+                    voiceIdentifier,
+                )
+                putExtra(
+                    NativeTTSPlaybackService.EXTRA_LANGUAGE,
+                    language,
+                )
+                putExtra(
+                    NativeTTSPlaybackService.EXTRA_RATE,
+                    rate.toFloat(),
+                )
+                putExtra(
+                    NativeTTSPlaybackService.EXTRA_PITCH,
+                    pitch.toFloat(),
+                )
+            },
+        )
+    }
+
     override fun pausePlayback() {
         if (!serviceActive) {
             return
