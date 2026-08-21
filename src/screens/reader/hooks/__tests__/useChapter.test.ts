@@ -1,10 +1,11 @@
 import { act, renderHook, waitFor } from '@testing-library/react-native';
 import useChapter from '../useChapter';
-import NativeFile from '@specs/NativeFile';
+import NativeFile from '@modules/native-file';
 
 const mockUseNovelActions = jest.fn();
 const mockUseChapterGeneralSettings = jest.fn();
 const mockUseLibrarySettings = jest.fn();
+const mockUseAppSettings = jest.fn();
 const mockUseTracker = jest.fn();
 const mockUseTrackedNovel = jest.fn();
 const mockUseFullscreenMode = jest.fn();
@@ -20,13 +21,17 @@ const mockFetchPage = jest.fn();
 const mockSanitizeChapterText = jest.fn();
 const mockParseChapterNumber = jest.fn();
 
+const mockUseNovelValue = jest.fn();
+
 jest.mock('@screens/novel/NovelContext', () => ({
   useNovelActions: () => mockUseNovelActions(),
+  useNovelValue: (key: string) => mockUseNovelValue(key),
 }));
 
 jest.mock('@hooks/persisted', () => ({
   useChapterGeneralSettings: () => mockUseChapterGeneralSettings(),
   useLibrarySettings: () => mockUseLibrarySettings(),
+  useAppSettings: () => mockUseAppSettings(),
   useTracker: () => mockUseTracker(),
   useTrackedNovel: (...args: unknown[]) => mockUseTrackedNovel(...args),
 }));
@@ -78,6 +83,7 @@ const makeChapter = (id: number, page = '1') => ({
   releaseTime: '2026-01-01',
   updatedTime: '2026-01-01',
   readTime: '2026-01-01',
+  timeSpent: 0,
 });
 
 const makeNovel = () => ({
@@ -121,6 +127,7 @@ const createStore = (
     updateChapterProgress: jest.fn(),
     chapterTextCache,
     setLastRead: jest.fn(),
+    increaseTimeSpent: jest.fn(),
   };
 
   return {
@@ -136,10 +143,28 @@ describe('useChapter', () => {
   const nextChapter = makeChapter(2, '1');
   const novel = makeNovel();
 
+  /**
+   * The hook keeps `hidden` separate from the rest so the reader chrome can
+   * toggle without invalidating the chapter context; flattening both keeps the
+   * assertions below focused on behaviour.
+   */
+  const useFlatChapter = (chapter: ReturnType<typeof makeChapter>) => {
+    const { hidden, chapterContext } = useChapter(
+      { current: null },
+      chapter,
+      novel,
+    );
+
+    return { hidden, ...chapterContext };
+  };
+
   beforeEach(() => {
     jest.clearAllMocks();
     (NativeFile.exists as jest.Mock).mockReturnValue(false);
-    (NativeFile.readFile as jest.Mock).mockReturnValue('');
+    // The native module rejects when the chapter is not downloaded.
+    (NativeFile.readFile as jest.Mock).mockRejectedValue(
+      new Error('File not found'),
+    );
 
     mockUseChapterGeneralSettings.mockReturnValue({
       autoScroll: false,
@@ -149,6 +174,10 @@ describe('useChapter', () => {
       volumeButtonsOffset: 100,
     });
     mockUseLibrarySettings.mockReturnValue({ incognitoMode: false });
+    mockUseAppSettings.mockReturnValue({
+      timeTrackingEnabled: true,
+      inactivityTimeoutMs: 60000,
+    });
     mockUseTracker.mockReturnValue({ tracker: { id: 'tracker' } });
     mockUseTrackedNovel.mockReturnValue({
       trackedNovel: { progress: 1 },
@@ -182,17 +211,58 @@ describe('useChapter', () => {
     const store = createStore({ [initialChapter.id]: 'cached chapter body' });
     mockUseNovelActions.mockReturnValue(store.state);
 
-    const { result } = renderHook(() =>
-      useChapter({ current: null }, initialChapter, novel),
-    );
+    const { result } = renderHook(() => useFlatChapter(initialChapter));
 
     await waitFor(() => expect(result.current.loading).toBe(false));
 
     expect(mockFetchChapter).not.toHaveBeenCalled();
-    expect(result.current.chapterText).toBe('SANITIZED:cached chapter body');
+    // Cached entries are already sanitized, so they are rendered as they are.
+    expect(result.current.chapterText).toBe('cached chapter body');
+    expect(mockSanitizeChapterText).not.toHaveBeenCalled();
     expect(store.chapterTextCache.write).not.toHaveBeenCalledWith(
       initialChapter.id,
       expect.anything(),
+    );
+  });
+
+  it('renders a downloaded chapter from storage without touching the network', async () => {
+    const store = createStore();
+    mockUseNovelActions.mockReturnValue(store.state);
+    (NativeFile.readFile as jest.Mock).mockResolvedValue('downloaded body');
+
+    const { result } = renderHook(() => useFlatChapter(initialChapter));
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    expect(result.current.chapterText).toBe('SANITIZED:downloaded body');
+    expect(mockFetchChapter).not.toHaveBeenCalled();
+    // A single native call doubles as the existence check.
+    expect(NativeFile.readFile).toHaveBeenCalledTimes(1);
+    expect(NativeFile.exists).not.toHaveBeenCalled();
+  });
+
+  it('renders the chapter before its adjacent chapters are resolved', async () => {
+    const store = createStore();
+    mockUseNovelActions.mockReturnValue(store.state);
+    (NativeFile.readFile as jest.Mock).mockResolvedValue('downloaded body');
+
+    const deferredNextChapter = createDeferred<unknown>();
+    mockGetNextChapter.mockReturnValue(deferredNextChapter.promise);
+
+    const { result } = renderHook(() => useFlatChapter(initialChapter));
+
+    // The neighbouring chapter lookups must not gate the first render.
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.chapterText).toBe('SANITIZED:downloaded body');
+    expect(result.current.nextChapter).toBeUndefined();
+
+    await act(async () => {
+      deferredNextChapter.resolve(nextChapter);
+      await deferredNextChapter.promise;
+    });
+
+    await waitFor(() =>
+      expect(result.current.nextChapter).toEqual(nextChapter),
     );
   });
 
@@ -202,9 +272,7 @@ describe('useChapter', () => {
     mockUseNovelActions.mockReturnValue(store.state);
     mockGetDbChapter.mockResolvedValue(hydratedChapter);
 
-    const { result } = renderHook(() =>
-      useChapter({ current: null }, initialChapter, novel),
-    );
+    const { result } = renderHook(() => useFlatChapter(initialChapter));
 
     await waitFor(() => expect(result.current.loading).toBe(false));
 
@@ -218,9 +286,7 @@ describe('useChapter', () => {
     mockUseNovelActions.mockReturnValue(store.state);
     mockGetDbChapter.mockResolvedValue(dbChapter);
 
-    const { result } = renderHook(() =>
-      useChapter({ current: null }, routeChapter, novel),
-    );
+    const { result } = renderHook(() => useFlatChapter(routeChapter));
 
     await waitFor(() => expect(result.current.loading).toBe(false));
 
@@ -236,9 +302,7 @@ describe('useChapter', () => {
     });
     mockUseNovelActions.mockReturnValue(store.state);
 
-    const { result } = renderHook(() =>
-      useChapter({ current: null }, initialChapter, novel),
-    );
+    const { result } = renderHook(() => useFlatChapter(initialChapter));
 
     await waitFor(() => expect(result.current.loading).toBe(false));
 
@@ -266,18 +330,26 @@ describe('useChapter', () => {
     expect(updateAllTrackedNovels).toHaveBeenCalledWith({ progress: 5 });
   });
 
-  it('sets error and remains stable when chapter fetch fails', async () => {
+  it('sets error and drops the failed load from the cache so a retry refetches', async () => {
     const store = createStore();
     mockUseNovelActions.mockReturnValue(store.state);
     mockFetchChapter.mockRejectedValueOnce(new Error('network failed'));
 
-    const { result } = renderHook(() =>
-      useChapter({ current: null }, initialChapter, novel),
-    );
+    const { result } = renderHook(() => useFlatChapter(initialChapter));
 
     await waitFor(() => expect(result.current.error).toBe('network failed'));
     expect(result.current.loading).toBe(false);
-    expect(result.current.chapterText).toBe('SANITIZED:');
+    expect(result.current.chapterText).toBe('');
+    expect(store.chapterTextCache.read(initialChapter.id)).toBeUndefined();
+
+    mockFetchChapter.mockResolvedValue('recovered body');
+    await act(async () => {
+      result.current.refetch();
+    });
+
+    await waitFor(() =>
+      expect(result.current.chapterText).toBe('SANITIZED:recovered body'),
+    );
   });
 
   it('reuses prefetched promise cache to avoid duplicate concurrent fetches for same chapter', async () => {
@@ -300,11 +372,18 @@ describe('useChapter', () => {
       },
     );
 
-    const { result } = renderHook(() =>
-      useChapter({ current: null }, initialChapter, novel),
-    );
+    const { result } = renderHook(() => useFlatChapter(initialChapter));
 
     await waitFor(() => expect(result.current.loading).toBe(false));
+
+    // The next chapter is prefetched once the current one is on screen.
+    await waitFor(() =>
+      expect(
+        mockFetchChapter.mock.calls.filter(
+          ([, path]) => path === nextChapter.path,
+        ),
+      ).toHaveLength(1),
+    );
 
     const navPromise = result.current.getChapter(nextChapter);
 
@@ -323,35 +402,30 @@ describe('useChapter', () => {
     expect(result.current.chapterText).toBe('SANITIZED:next body');
   });
 
-  it('prepares 10 TTS chapters and appends 10 more when only 3 remain', async () => {
+  it('prefetches 10 chapters and appends 10 more when the seventh becomes active', async () => {
     const store = createStore();
     mockUseNovelActions.mockReturnValue(store.state);
-
-    const chapters = Array.from({ length: 20 }, (_, index) => {
-      const id = index + 1;
-      const page = id <= 6 ? '1' : '2';
-      return {
-        ...makeChapter(id, page),
-        position: id <= 6 ? id - 1 : id - 7,
-      };
-    });
+    const chapters = Array.from({ length: 20 }, (_, index) => ({
+      ...makeChapter(index + 1, index < 6 ? '1' : '2'),
+      position: index < 6 ? index : index - 6,
+    }));
     let secondPageLoaded = false;
 
-    mockGetDbChapter.mockResolvedValue(chapters[0]);
+    mockGetDbChapter.mockImplementation(async (id: number) =>
+      chapters.find(item => item.id === id),
+    );
     mockGetNextChapter.mockImplementation(
       async (_novelId: number, position: number, page: string) => {
-        if (page === '1') {
-          if (position < 5) {
-            return chapters[position + 1];
-          }
-          return secondPageLoaded ? chapters[6] : undefined;
+        const currentIndex = chapters.findIndex(
+          item => item.page === page && item.position === position,
+        );
+        if (currentIndex < 0 || currentIndex >= chapters.length - 1) {
+          return undefined;
         }
-
-        if (page === '2' && position < 13) {
-          return chapters[position + 7];
-        }
-
-        return undefined;
+        const candidate = chapters[currentIndex + 1];
+        return candidate.page === '2' && !secondPageLoaded
+          ? undefined
+          : candidate;
       },
     );
     mockGetChapterCount.mockImplementation(
@@ -361,16 +435,7 @@ describe('useChapter', () => {
         return 0;
       },
     );
-    mockFetchPage.mockImplementation(async (_pluginId, _path, page) => ({
-      chapters:
-        page === '2'
-          ? chapters.slice(6).map(ch => ({
-              name: ch.name,
-              path: ch.path,
-              page: ch.page,
-            }))
-          : [],
-    }));
+    mockFetchPage.mockResolvedValue({ chapters: chapters.slice(6) });
     mockInsertChapters.mockImplementation(async () => {
       secondPageLoaded = true;
     });
@@ -378,9 +443,7 @@ describe('useChapter', () => {
       async (_pluginId: string, path: string) => `body:${path}`,
     );
 
-    const { result } = renderHook(() =>
-      useChapter({ current: null }, chapters[0], novel),
-    );
+    const { result } = renderHook(() => useFlatChapter(chapters[0]));
 
     await waitFor(() =>
       expect(
@@ -396,16 +459,13 @@ describe('useChapter', () => {
     await act(async () => {
       preparedQueue = await result.current.prepareTTSChapterQueue();
     });
-
     expect(preparedQueue.map(item => item.chapter.id)).toEqual(
       chapters.slice(0, 10).map(item => item.id),
     );
-    expect(mockFetchPage).toHaveBeenCalledWith(novel.pluginId, novel.path, '2');
 
     await act(async () => {
       await result.current.getChapter(chapters[6]);
     });
-
     await waitFor(() =>
       expect(
         mockFetchChapter.mock.calls.some(
@@ -414,12 +474,12 @@ describe('useChapter', () => {
       ).toBe(true),
     );
 
-    for (const prefetchedChapter of chapters) {
+    chapters.forEach(prefetchedChapter => {
       expect(
         mockFetchChapter.mock.calls.filter(
           ([, path]) => path === prefetchedChapter.path,
         ),
       ).toHaveLength(1);
-    }
+    });
   });
 });

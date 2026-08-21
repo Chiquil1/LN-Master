@@ -1,17 +1,12 @@
-import React, { useMemo, useState } from 'react';
-import {
-  ScrollView,
-  StyleSheet,
-  View,
-  Appearance,
-  GestureResponderEvent,
-} from 'react-native';
+import { useMemo, useState } from 'react';
+import { ScrollView, StyleSheet, View, Appearance } from 'react-native';
 
 import { ThemePicker } from '@components/ThemePicker/ThemePicker';
 import type { SegmentedControlOption } from '@components/SegmentedControl';
 import SettingSwitch from '../components/SettingSwitch';
 import ColorPickerModal from '@components/ColorPickerModal/ColorPickerModal';
 import LanguagePickerModal from './LanguagePickerModal';
+import DateFormatModal from './DateFormatModal';
 
 import { useAppSettings, useTheme } from '@hooks/persisted';
 import {
@@ -21,11 +16,17 @@ import {
 } from 'react-native-mmkv';
 import { Appbar, List, SafeAreaView, SegmentedControl } from '@components';
 import { AppearanceSettingsScreenProps } from '@navigators/types';
-import { getString } from '@strings/translations';
+import { getString } from '@i18n/translations';
 import { darkThemes, lightThemes } from '@theme/md3';
+import {
+  DYNAMIC_THEME_ID,
+  getSystemDynamicTheme,
+  isDynamicThemeAvailable,
+  toDynamicThemeColors,
+} from '@theme/dynamic';
 import { ThemeColors } from '@theme/types';
-import switchTheme from 'react-native-theme-switch-animation';
 import Color from 'color';
+import { formatDate, getDateFormatLabel } from '@utils/dateFormat';
 
 type ThemeMode = 'light' | 'dark' | 'system';
 
@@ -46,6 +47,8 @@ const AppearanceSettings = ({ navigation }: AppearanceSettingsScreenProps) => {
     showLabelsInNav,
     hideBackdrop,
     useFabForContinueReading,
+    dateFormat = 'default',
+    relativeTimestamps = true,
     setAppSettings,
   } = useAppSettings();
 
@@ -56,6 +59,21 @@ const AppearanceSettings = ({ navigation }: AppearanceSettingsScreenProps) => {
       : colorScheme === 'unspecified'
       ? 'light'
       : colorScheme;
+  const availableThemes = useMemo(() => {
+    const themes = actualThemeMode === 'light' ? lightThemes : darkThemes;
+    if (!isDynamicThemeAvailable) {
+      return themes;
+    }
+
+    const dynamicTheme =
+      theme.id === DYNAMIC_THEME_ID
+        ? theme
+        : toDynamicThemeColors(
+            getSystemDynamicTheme(),
+            actualThemeMode === 'dark',
+          );
+    return [dynamicTheme, ...themes];
+  }, [actualThemeMode, theme]);
 
   /**
    * Accent Color Modal
@@ -71,6 +89,10 @@ const AppearanceSettings = ({ navigation }: AppearanceSettingsScreenProps) => {
   const showLanguageModal = () => setLanguageModal(true);
   const hideLanguageModal = () => setLanguageModal(false);
   const [appLocale = ''] = useMMKVString('APP_LOCALE');
+
+  const [dateFormatModal, setDateFormatModal] = useState(false);
+  const showDateFormatModal = () => setDateFormatModal(true);
+  const hideDateFormatModal = () => setDateFormatModal(false);
 
   const getCurrentLanguageName = (): string => {
     if (!appLocale) {
@@ -134,63 +156,13 @@ const AppearanceSettings = ({ navigation }: AppearanceSettingsScreenProps) => {
     [],
   );
 
-  // const handleModeChange = (mode: ThemeMode) => {
-  //   setThemeMode(mode);
-
-  //   if (mode !== 'system') {
-  //     const themes = mode === 'dark' ? darkThemes : lightThemes;
-  //     const currentThemeInMode = themes.find(t => t.id === theme.id);
-
-  //     if (!currentThemeInMode) {
-  //       setThemeId(themes[0].id);
-  //     }
-  //   }
-  // };
-
-  // const handleThemeSelect = (selectedTheme: ThemeColors) => {
-  //   setThemeId(selectedTheme.id);
-  //   setCustomAccentColor(undefined);
-
-  //   if (actualThemeMode !== 'system') {
-  //     setThemeMode(selectedTheme.isDark ? 'dark' : 'light');
-  //   }
-  // };
-
-  const handleModeChange = (mode: ThemeMode, event: GestureResponderEvent) => {
+  const handleModeChange = (mode: ThemeMode) => {
     setThemeMode(mode);
-    event.currentTarget.measure((_x1, _y1, width, height, px, py) => {
-      switchTheme({
-        switchThemeFunction: () => {},
-        animationConfig: {
-          type: 'circular',
-          duration: 400,
-          startingPoint: {
-            cy: py + height / 2,
-            cx: px + width / 2,
-          },
-        },
-      });
-    });
   };
 
-  const handleThemeSelect = (
-    selectedTheme: ThemeColors,
-    event: GestureResponderEvent,
-  ) => {
+  const handleThemeSelect = (selectedTheme: ThemeColors) => {
     setThemeId(selectedTheme.id);
-    event.currentTarget.measure((_x1, _y1, width, height, px, py) => {
-      switchTheme({
-        switchThemeFunction: () => {},
-        animationConfig: {
-          type: 'circular',
-          duration: 400,
-          startingPoint: {
-            cy: py + height / 2,
-            cx: px + width / 2,
-          },
-        },
-      });
-    });
+    setCustomAccentColor(undefined);
   };
 
   return (
@@ -219,30 +191,21 @@ const AppearanceSettings = ({ navigation }: AppearanceSettingsScreenProps) => {
             />
           </View>
 
-          {/* Light Themes */}
-          {/*<Text style={[{ color: theme.onSurface }, styles.themeSectionText]}>
-            {getString('appearanceScreen.lightTheme')}
-          </Text>*/}
           <View style={styles.scrollViewContainer}>
             <ScrollView
-              contentContainerStyle={[
-                styles.themePickerRow,
-                { backgroundColor: theme.surfaceVariant },
-              ]}
+              contentContainerStyle={styles.themePickerRow}
               horizontal={true}
               showsHorizontalScrollIndicator={false}
             >
-              {(actualThemeMode === 'light' ? lightThemes : darkThemes).map(
-                item => (
-                  <ThemePicker
-                    horizontal
-                    key={item.id}
-                    currentTheme={theme}
-                    theme={item}
-                    onPress={e => handleThemeSelect(item, e)}
-                  />
-                ),
-              )}
+              {availableThemes.map(item => (
+                <ThemePicker
+                  horizontal
+                  key={item.id}
+                  currentTheme={theme}
+                  theme={item}
+                  onPress={() => handleThemeSelect(item)}
+                />
+              ))}
             </ScrollView>
           </View>
           {theme.isDark ? (
@@ -253,19 +216,45 @@ const AppearanceSettings = ({ navigation }: AppearanceSettingsScreenProps) => {
               theme={theme}
             />
           ) : null}
-          <List.ColorItem
-            title={getString('appearanceScreen.accentColor')}
-            color={Color(theme.primary)}
-            onPress={showAccentColorModal}
-            theme={theme}
-          />
+          {theme.id === DYNAMIC_THEME_ID ? null : (
+            <List.ColorItem
+              title={getString('appearanceScreen.accentColor')}
+              color={Color(theme.primary)}
+              onPress={showAccentColorModal}
+              theme={theme}
+            />
+          )}
+          <List.SubHeader theme={theme}>
+            {getString('common.display')}
+          </List.SubHeader>
           <List.Item
             title={getString('appearanceScreen.appLanguage')}
             description={getCurrentLanguageName()}
             onPress={showLanguageModal}
             theme={theme}
           />
-          <List.Divider theme={theme} />
+          <List.Item
+            title={getString('appearanceScreen.dateFormat')}
+            description={getDateFormatLabel(dateFormat)}
+            onPress={showDateFormatModal}
+            theme={theme}
+          />
+          <SettingSwitch
+            label={getString('appearanceScreen.relativeTimestamps')}
+            description={getString(
+              'appearanceScreen.relativeTimestampsDescription',
+              {
+                date: formatDate(new Date(), dateFormat, false),
+              },
+            )}
+            value={relativeTimestamps}
+            onPress={() =>
+              setAppSettings({
+                relativeTimestamps: !relativeTimestamps,
+              })
+            }
+            theme={theme}
+          />
           <List.SubHeader theme={theme}>
             {getString('appearanceScreen.novelInfo')}
           </List.SubHeader>
@@ -285,7 +274,6 @@ const AppearanceSettings = ({ navigation }: AppearanceSettingsScreenProps) => {
             }
             theme={theme}
           />
-          <List.Divider theme={theme} />
           <List.SubHeader theme={theme}>
             {getString('appearanceScreen.navbar')}
           </List.SubHeader>
@@ -325,6 +313,10 @@ const AppearanceSettings = ({ navigation }: AppearanceSettingsScreenProps) => {
         visible={languageModal}
         onDismiss={hideLanguageModal}
       />
+      <DateFormatModal
+        visible={dateFormatModal}
+        onDismiss={hideDateFormatModal}
+      />
     </SafeAreaView>
   );
 };
@@ -338,24 +330,17 @@ const styles = StyleSheet.create({
   scrollContent: {
     paddingBottom: 40,
   },
-  themeSectionText: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-  },
   themePickerRow: {
-    borderRadius: 24,
-    //marginHorizontal: 8,
-    paddingHorizontal: 4,
-    paddingTop: 8,
-    paddingBottom: 2,
     flexDirection: 'row',
     alignItems: 'center',
+    gap: 12,
   },
   scrollViewContainer: {
-    paddingHorizontal: 8,
+    marginVertical: 24,
+    paddingHorizontal: 16,
   },
   segmentedControlContainer: {
     paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingTop: 12,
   },
 });

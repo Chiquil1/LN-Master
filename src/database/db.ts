@@ -26,6 +26,28 @@ class MyLogger implements Logger {
 const DB_NAME = 'lnreader.db';
 const _db = open({ name: DB_NAME, location: '../files/SQLite' });
 
+const INITIAL_MIGRATION_NAME = '20251222152612_past_mandrill';
+const INITIAL_MIGRATION_CREATED_AT = 1766417172000;
+const SCANLATOR_MIGRATION_NAME = '20260612232322_normal_saracen';
+const SCANLATOR_MIGRATION_CREATED_AT = 1781306602000;
+const TIME_SPENT_MIGRATION_NAME = '20260719143427_long_moondragon';
+const TIME_SPENT_MIGRATION_CREATED_AT = 1784471667000;
+
+const CHAPTER_COLUMN_MIGRATIONS = [
+  {
+    columnName: 'scanlator',
+    columnDefinition: 'text',
+    migrationName: SCANLATOR_MIGRATION_NAME,
+    createdAt: SCANLATOR_MIGRATION_CREATED_AT,
+  },
+  {
+    columnName: 'timeSpent',
+    columnDefinition: 'integer DEFAULT 0',
+    migrationName: TIME_SPENT_MIGRATION_NAME,
+    createdAt: TIME_SPENT_MIGRATION_CREATED_AT,
+  },
+] as const;
+
 /**
  * Raw SQLite database instance
  * @deprecated Use `drizzleDb` for new code
@@ -48,6 +70,154 @@ type SqlExecutor = {
     sql: string,
     params?: Parameters<typeof _db.executeSync>[1],
   ) => void;
+};
+
+type MigrationExecutor = {
+  executeRawSync: (sql: string) => unknown[][];
+  executeSync: (sql: string) => unknown;
+};
+
+/**
+ * Recovers the one interruption point where the previous repair migration
+ * could have dropped Novel before renaming its populated replacement.
+ */
+export const repairInterruptedNovelMigration = (
+  executor: MigrationExecutor,
+) => {
+  const tableNames = new Set(
+    executor
+      .executeRawSync("SELECT name FROM sqlite_master WHERE type = 'table';")
+      .map(row => row[0]),
+  );
+  const hasNovel = tableNames.has('Novel');
+  const hasNovelSnapshot = tableNames.has('__migration_Novel');
+  const hasNewNovel = tableNames.has('__new_Novel');
+  const hasMigrationState =
+    hasNovelSnapshot ||
+    hasNewNovel ||
+    tableNames.has('__migration_Chapter') ||
+    tableNames.has('__migration_NovelCategory');
+
+  if (!hasMigrationState || hasNovel || hasNovelSnapshot) {
+    return;
+  }
+  if (!hasNewNovel) {
+    throw new Error(
+      'Cannot recover interrupted Novel migration: no source table remains',
+    );
+  }
+
+  executor.executeSync("ALTER TABLE '__new_Novel' RENAME TO 'Novel';");
+};
+
+/**
+ * Brings a retained Chapter snapshot up to the current schema before an
+ * interrupted migration is retried. Older snapshots can predate columns that
+ * were added to Chapter, so restoring them with the current migration would
+ * otherwise fail with a column-count mismatch.
+ */
+export const repairChapterMigrationSnapshot = (executor: MigrationExecutor) => {
+  const snapshotColumns = executor.executeRawSync(
+    'PRAGMA table_info(__migration_Chapter);',
+  );
+
+  if (snapshotColumns.length === 0) {
+    return;
+  }
+
+  const snapshotColumnNames = new Set(snapshotColumns.map(row => row[1]));
+  for (const migration of CHAPTER_COLUMN_MIGRATIONS) {
+    if (snapshotColumnNames.has(migration.columnName)) {
+      continue;
+    }
+    executor.executeSync(
+      `ALTER TABLE '__migration_Chapter' ADD COLUMN '${migration.columnName}' ${migration.columnDefinition};`,
+    );
+  }
+};
+
+/**
+ * Repairs migration metadata created by older Drizzle versions and interrupted
+ * migrations. SQLite cannot add a column conditionally, so an existing column
+ * must be recorded before the migrator attempts to add it again.
+ */
+export const repairMigrationHistory = (executor: MigrationExecutor) => {
+  const migrationColumns = executor.executeRawSync(
+    'PRAGMA table_info(__drizzle_migrations);',
+  );
+
+  if (migrationColumns.length === 0) {
+    return;
+  }
+
+  const columnNames = new Set(migrationColumns.map(row => row[1]));
+  if (!columnNames.has('name')) {
+    executor.executeSync(
+      "ALTER TABLE '__drizzle_migrations' ADD COLUMN 'name' text;",
+    );
+  }
+  if (!columnNames.has('applied_at')) {
+    executor.executeSync(
+      "ALTER TABLE '__drizzle_migrations' ADD COLUMN 'applied_at' text;",
+    );
+  }
+
+  executor.executeSync(`
+    UPDATE __drizzle_migrations
+    SET name = '${INITIAL_MIGRATION_NAME}'
+    WHERE name IS NULL
+      AND created_at = ${INITIAL_MIGRATION_CREATED_AT};
+  `);
+
+  const chapterColumns = executor.executeRawSync('PRAGMA table_info(Chapter);');
+  const chapterColumnNames = new Set(chapterColumns.map(row => row[1]));
+
+  for (const migration of CHAPTER_COLUMN_MIGRATIONS) {
+    if (!chapterColumnNames.has(migration.columnName)) {
+      continue;
+    }
+    executor.executeSync(`
+      INSERT INTO __drizzle_migrations
+        (hash, created_at, name, applied_at)
+      SELECT '', ${migration.createdAt},
+        '${migration.migrationName}', datetime('now')
+      WHERE NOT EXISTS (
+        SELECT 1 FROM __drizzle_migrations
+        WHERE name = '${migration.migrationName}'
+      );
+    `);
+  }
+};
+
+/**
+ * Drizzle beta 20 does not currently read op-sqlite's array-shaped query
+ * results when deciding which migrations are pending. Filter them explicitly
+ * until the driver handles the current op-sqlite result shape.
+ */
+export const getPendingMigrations = (executor: MigrationExecutor) => {
+  const migrationColumns = executor.executeRawSync(
+    'PRAGMA table_info(__drizzle_migrations);',
+  );
+
+  if (migrationColumns.length === 0) {
+    return migrations;
+  }
+
+  const appliedMigrations = new Set(
+    executor
+      .executeRawSync(
+        'SELECT name FROM __drizzle_migrations WHERE name IS NOT NULL;',
+      )
+      .map(row => row[0]),
+  );
+
+  return {
+    migrations: Object.fromEntries(
+      Object.entries(migrations.migrations).filter(
+        ([name]) => !appliedMigrations.has(name),
+      ),
+    ),
+  };
 };
 
 const setPragmas = (executor: SqlExecutor) => {
@@ -82,6 +252,21 @@ const createDbTriggers = (executor: SqlExecutor) => {
 export const runDatabaseBootstrap = (executor: SqlExecutor) => {
   createDbTriggers(executor);
   populateDatabase(executor);
+};
+
+let initialization: Promise<void> | undefined;
+
+export const initializeDatabase = () => {
+  if (!initialization) {
+    setPragmas(_db);
+    repairInterruptedNovelMigration(_db);
+    repairChapterMigrationSnapshot(_db);
+    repairMigrationHistory(_db);
+    initialization = migrate(drizzleDb, getPendingMigrations(_db)).then(() => {
+      runDatabaseBootstrap(_db);
+    });
+  }
+  return initialization;
 };
 
 type InitDbState = {
@@ -126,25 +311,8 @@ export const useInitDatabase = () => {
   const [state, dispatch] = useReducer(fetchReducer, initialState);
   useEffect(() => {
     dispatch({ type: 'migrating' });
-    setPragmas(_db);
-
-    // To resolve issue in drizzle before beta 16
-    const results = db.executeRawSync(
-      `PRAGMA table_info(__drizzle_migrations);`,
-    );
-    const resolved = results.some((row: unknown[]) => row[1] === 'applied_at');
-    if (!resolved && results.length > 0) {
-      _db.executeRawSync(
-        "ALTER TABLE '__drizzle_migrations' ADD COLUMN 'applied_at' text;",
-      );
-      _db.executeRawSync(
-        "ALTER TABLE '__drizzle_migrations' ADD COLUMN 'name' text;",
-      );
-    }
-
-    migrate(drizzleDb, migrations)
+    initializeDatabase()
       .then(() => {
-        runDatabaseBootstrap(_db);
         dispatch({
           type: 'migrated',
           payload: true,

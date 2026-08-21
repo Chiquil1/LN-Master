@@ -1,7 +1,7 @@
 import { eq, sql, inArray, and, ne, count } from 'drizzle-orm';
 import { BackupCategory, Category, NovelCategory, CCategory } from '../types';
 import { showToast } from '@utils/showToast';
-import { getString } from '@strings/translations';
+import { getString } from '@i18n/translations';
 import { dbManager } from '@database/db';
 import {
   categorySchema,
@@ -13,7 +13,7 @@ import {
  * Get all categories with their novel IDs using Drizzle ORM
  */
 export const getCategoriesFromDb = async (): Promise<
-  Array<CategoryRow & { novelIds: string | null }>
+  (CategoryRow & { novelIds: string | null })[]
 > => {
   return await dbManager
     .select({
@@ -186,10 +186,10 @@ export const updateCategoryOrderInDb = async (
   }
 
   await dbManager.write(async tx => {
-    for (const category of categories) {
+    for (const [index, category] of categories.entries()) {
       await tx
         .update(categorySchema)
-        .set({ sort: category.sort })
+        .set({ sort: index + 1 })
         .where(eq(categorySchema.id, category.id))
         .run();
     }
@@ -232,14 +232,13 @@ export const _restoreCategory = async (
 
     // Insert novel-category associations
     if (category.novelIds && category.novelIds.length > 0) {
-      const values = category.novelIds.map(novelId => ({
-        categoryId: category.id,
-        novelId,
-      }));
-      if (values.length) {
+      for (const novelId of category.novelIds) {
         await tx
           .insert(novelCategorySchema)
-          .values(values)
+          .values({
+            categoryId: category.id,
+            novelId: novelId,
+          })
           .onConflictDoNothing()
           .run();
       }

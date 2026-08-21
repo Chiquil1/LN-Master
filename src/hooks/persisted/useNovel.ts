@@ -1,4 +1,4 @@
-import NativeFile from '@specs/NativeFile';
+import NativeFile from '@modules/native-file';
 import { NOVEL_STORAGE } from '@utils/Storages';
 import { MMKVStorage } from '@utils/mmkv/mmkv';
 import {
@@ -52,8 +52,8 @@ export const deleteCachedNovels = async () => {
     });
 
     const novelDir = `${NOVEL_STORAGE}/${novel.pluginId}/${novel.id}`;
-    if (NativeFile.exists(novelDir)) {
-      NativeFile.unlink(novelDir);
+    if (await NativeFile.exists(novelDir)) {
+      await NativeFile.unlink(novelDir);
     }
   }
 

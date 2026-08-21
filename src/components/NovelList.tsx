@@ -1,107 +1,97 @@
-import { useLibrarySettings } from '@hooks/persisted';
-import { DisplayModes } from '@screens/library/constants/constants';
 import React, { useMemo } from 'react';
+import { StyleSheet } from 'react-native';
 import {
-  StyleSheet,
-  FlatList,
-  FlatListProps,
-  ListRenderItem,
-} from 'react-native';
+  FlashList,
+  type FlashListProps,
+  type ListRenderItem,
+} from '@shopify/flash-list';
 import { NovelItem } from '@plugins/types';
 import { NovelInfo } from '../database/types';
-import { useDeviceOrientation } from '@hooks';
+import { DisplayModes } from '@screens/library/constants/constants';
+import {
+  NovelCoverLayoutProvider,
+  useNovelCoverLayoutValue,
+} from './NovelCoverLayoutContext';
 
 export type NovelListRenderItem = ListRenderItem<NovelInfo | NovelItem>;
 
-type listDataItem =
-  | (NovelInfo | NovelItem) & {
-      completeRow?: number;
-    };
+export type NovelListDataItem = (NovelInfo | NovelItem) & {
+  completeRow?: number;
+};
 
-interface NovelListProps extends FlatListProps<NovelInfo | NovelItem> {
+interface NovelListProps
+  extends Omit<FlashListProps<NovelInfo | NovelItem>, 'data'> {
   inSource?: boolean;
-  data: Array<listDataItem>;
+  data: NovelListDataItem[];
 }
 
-const novelListKeyExtractor = (item: NovelInfo | NovelItem, index: number) => {
-  const maybeId = (item as any).id;
-  const key =
-    maybeId != null ? String(maybeId) : (item as any).path ?? String(index);
-  return key;
+export const novelListKeyExtractor = (item: NovelInfo | NovelItem) =>
+  'pluginId' in item ? `${item.pluginId}:${item.path}` : item.path;
+
+export const extendNovelList = (
+  data: NovelListDataItem[],
+  inSource: boolean | undefined,
+  numColumns: number,
+) => {
+  if (!data.length || !inSource) {
+    return data;
+  }
+
+  const remainder = numColumns - (data.length % numColumns);
+  const extension: NovelListDataItem[] = [];
+
+  if (remainder !== 0 && remainder !== numColumns) {
+    for (let index = 0; index < remainder; index += 1) {
+      extension.push({
+        id: undefined,
+        cover: '',
+        name: '',
+        path: `__loading-filler-${index}`,
+        completeRow: 1,
+      });
+    }
+  }
+
+  extension.push({
+    id: undefined,
+    cover: '',
+    name: '',
+    path: '__loading-row',
+    completeRow: 2,
+  });
+
+  return [...data, ...extension];
 };
 
 const NovelList: React.FC<NovelListProps> = props => {
-  const { displayMode = DisplayModes.Comfortable, novelsPerRow = 3 } =
-    useLibrarySettings();
-  const orientation = useDeviceOrientation();
-
+  const layout = useNovelCoverLayoutValue();
+  const { displayMode, numColumns } = layout;
   const isListView = displayMode === DisplayModes.List;
+  const { data, inSource, ...listProps } = props;
 
-  const numColumns = useMemo(() => {
-    if (isListView) {
-      return 1;
-    }
-
-    if (orientation === 'landscape') {
-      return 6;
-    } else {
-      return novelsPerRow;
-    }
-  }, [isListView, orientation, novelsPerRow]);
-
-  const extendedNovelList: Array<listDataItem> = useMemo(() => {
-    if (!props.data) return [] as Array<listDataItem>;
-    if (!props.inSource || !props.data.length) return props.data;
-
-    const remainder = numColumns - (props.data.length % numColumns);
-    const extension: Array<listDataItem> = [];
-    if (remainder !== 0 && remainder !== numColumns) {
-      for (let i = 0; i < remainder; i++) {
-        extension.push({
-          cover: '',
-          name: '',
-          path: 'loading-' + remainder + '-' + i,
-          completeRow: 1,
-        } as listDataItem);
-      }
-    }
-    extension.push({
-      cover: '',
-      name: '',
-      path: 'loading-' + remainder + '-end',
-      completeRow: 2,
-    } as listDataItem);
-
-    return [...props.data, ...extension];
-  }, [props.data, props.inSource, numColumns]);
-
-  const performanceDefaults = {
-    initialNumToRender:
-      (props.initialNumToRender as number) ?? (isListView ? 10 : 9),
-    windowSize: (props.windowSize as number) ?? 21,
-    removeClippedSubviews: (props.removeClippedSubviews as boolean) ?? true,
-    maxToRenderPerBatch: (props.maxToRenderPerBatch as number) ?? 10,
-    updateCellsBatchingPeriod:
-      (props.updateCellsBatchingPeriod as number) ?? 50,
-  };
+  const extendedNovelList = useMemo(
+    () => extendNovelList(data, inSource, numColumns),
+    [data, inSource, numColumns],
+  );
 
   return (
-    <FlatList
-      contentContainerStyle={[
-        !isListView && styles.listView,
-        styles.flatListCont,
-      ]}
-      numColumns={numColumns}
-      key={numColumns}
-      keyExtractor={novelListKeyExtractor}
-      {...performanceDefaults}
-      {...props}
-      data={extendedNovelList}
-    />
+    <NovelCoverLayoutProvider value={layout}>
+      <FlashList
+        contentContainerStyle={[
+          !isListView && styles.listView,
+          styles.flatListCont,
+        ]}
+        numColumns={numColumns}
+        key={numColumns}
+        keyExtractor={novelListKeyExtractor}
+        {...listProps}
+        data={extendedNovelList}
+      />
+    </NovelCoverLayoutProvider>
   );
 };
 
-export default React.memo(NovelList);
+export default NovelList;
 
 const styles = StyleSheet.create({
   flatListCont: {

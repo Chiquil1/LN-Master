@@ -34,7 +34,7 @@ const SubHeader = ({
   children: ReactNode;
   theme: ThemeColors;
 }) => (
-  <PaperList.Subheader style={{ color: theme.onSurfaceVariant }}>
+  <PaperList.Subheader style={{ color: theme.primary }}>
     {children}
   </PaperList.Subheader>
 );

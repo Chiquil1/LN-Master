@@ -10,9 +10,11 @@ import {
   markPreviousChaptersUnread as _markPreviousChaptersUnread,
   markPreviuschaptersRead as _markPreviuschaptersRead,
   updateChapterProgress as _updateChapterProgress,
+  updateChapterProgressByIds as _updateChapterProgressByIds,
+  increaseTimeSpent as _increaseTimeSpent,
 } from '@database/queries/ChapterQueries';
 import { ChapterInfo, NovelInfo } from '@database/types';
-import { getString as translateGetString } from '@strings/translations';
+import { getString as translateGetString } from '@i18n/translations';
 import { showToast } from '@utils/showToast';
 
 type MutateChapters = (mutation: (chs: ChapterInfo[]) => ChapterInfo[]) => void;
@@ -33,6 +35,10 @@ export interface ChapterActionsDependencies {
   ) => Promise<void>;
   markChaptersUnread: (chapterIds: number[]) => Promise<void>;
   updateChapterProgress: (chapterId: number, progress: number) => Promise<void>;
+  updateChapterProgressByIds: (
+    chapterIds: number[],
+    progress: number,
+  ) => Promise<void>;
   deleteChapter: (
     pluginId: string,
     novelId: number,
@@ -49,6 +55,7 @@ export interface ChapterActionsDependencies {
     filter?: ChapterFilterKey[],
     page?: string,
   ) => Promise<ChapterInfo[]>;
+  increaseTimeSpent: (chapterId: number, timeSpent: number) => Promise<void>;
   showToast: (message: string) => void;
   getString: typeof translateGetString;
 }
@@ -61,9 +68,11 @@ export const defaultChapterActionsDependencies: ChapterActionsDependencies = {
   markPreviousChaptersUnread: _markPreviousChaptersUnread,
   markChaptersUnread: _markChaptersUnread,
   updateChapterProgress: _updateChapterProgress,
+  updateChapterProgressByIds: _updateChapterProgressByIds,
   deleteChapter: _deleteChapter,
   deleteChapters: _deleteChapters,
   getPageChapters: _getPageChapters,
+  increaseTimeSpent: _increaseTimeSpent,
   showToast,
   getString: translateGetString,
 };
@@ -90,6 +99,7 @@ export const bookmarkChaptersAction = (
   mutateChapters: MutateChapters,
   deps: ChapterActionsDependencies = defaultChapterActionsDependencies,
 ) => {
+  const chapterIds = new Set(_chapters.map(chapter => chapter.id));
   runAsyncAction(
     Promise.all(_chapters.map(_chapter => deps.bookmarkChapter(_chapter.id))),
     deps,
@@ -97,7 +107,7 @@ export const bookmarkChaptersAction = (
 
   mutateChapters(chs =>
     chs.map(chapter => {
-      if (_chapters.some(_c => _c.id === chapter.id)) {
+      if (chapterIds.has(chapter.id)) {
         return {
           ...chapter,
           bookmark: !chapter.bookmark,
@@ -131,8 +141,13 @@ export const markChapterReadAction = (
 ) => {
   runAsyncAction(deps.markChapterRead(chapterId), deps);
 
-  mutateChapters(chs =>
-    chs.map(c => {
+  mutateChapters(chs => {
+    // Reaching the end of a chapter marks it read on every progress report.
+    if (!chs.some(c => c.id === chapterId && c.unread)) {
+      return chs;
+    }
+
+    return chs.map(c => {
       if (c.id !== chapterId) {
         return c;
       }
@@ -141,8 +156,8 @@ export const markChapterReadAction = (
         ...c,
         unread: false,
       };
-    }),
-  );
+    });
+  });
 };
 
 export const markChaptersReadAction = (
@@ -151,11 +166,12 @@ export const markChaptersReadAction = (
   deps: ChapterActionsDependencies = defaultChapterActionsDependencies,
 ) => {
   const chapterIds = _chapters.map(chapter => chapter.id);
+  const chapterIdSet = new Set(chapterIds);
   runAsyncAction(deps.markChaptersRead(chapterIds), deps);
 
   mutateChapters(chs =>
     chs.map(chapter => {
-      if (chapterIds.includes(chapter.id)) {
+      if (chapterIdSet.has(chapter.id)) {
         return {
           ...chapter,
           unread: false,
@@ -188,11 +204,12 @@ export const markChaptersUnreadAction = (
   deps: ChapterActionsDependencies = defaultChapterActionsDependencies,
 ) => {
   const chapterIds = _chapters.map(chapter => chapter.id);
+  const chapterIdSet = new Set(chapterIds);
   runAsyncAction(deps.markChaptersUnread(chapterIds), deps);
 
   mutateChapters(chs =>
     chs.map(chapter => {
-      if (chapterIds.includes(chapter.id)) {
+      if (chapterIdSet.has(chapter.id)) {
         return {
           ...chapter,
           unread: true,
@@ -201,6 +218,33 @@ export const markChaptersUnreadAction = (
       return chapter;
     }),
   );
+};
+
+export const markChaptersUnreadAndResetProgressAction = async (
+  chapters: ChapterInfo[],
+  mutateChapters: MutateChapters,
+  deps: ChapterActionsDependencies = defaultChapterActionsDependencies,
+): Promise<boolean> => {
+  const chapterIds = chapters.map(chapter => chapter.id);
+  const chapterIdSet = new Set(chapterIds);
+
+  try {
+    await Promise.all([
+      deps.markChaptersUnread(chapterIds),
+      deps.updateChapterProgressByIds(chapterIds, 0),
+    ]);
+    mutateChapters(current =>
+      current.map(chapter =>
+        chapterIdSet.has(chapter.id)
+          ? { ...chapter, unread: true, progress: 0 }
+          : chapter,
+      ),
+    );
+    return true;
+  } catch (error) {
+    deps.showToast(getErrorMessage(error));
+    return false;
+  }
 };
 
 export const updateChapterProgressAction = (
@@ -215,8 +259,17 @@ export const updateChapterProgressAction = (
     deps,
   );
 
-  mutateChapters(chs =>
-    chs.map(c => {
+  mutateChapters(chs => {
+    // The reader reports progress continuously while scrolling. Keeping the
+    // same array when nothing changed spares every chapter list subscribed to
+    // the store a re-render.
+    if (
+      !chs.some(c => c.id === chapterId && c.progress !== normalizedProgress)
+    ) {
+      return chs;
+    }
+
+    return chs.map(c => {
       if (c.id !== chapterId) {
         return c;
       }
@@ -225,8 +278,8 @@ export const updateChapterProgressAction = (
         ...c,
         progress: normalizedProgress,
       };
-    }),
-  );
+    });
+  });
 };
 
 export const deleteChapterAction = (
@@ -268,6 +321,7 @@ export const deleteChaptersAction = (
   deps: ChapterActionsDependencies = defaultChapterActionsDependencies,
 ) => {
   if (novel) {
+    const chapterIds = new Set(_chapters.map(chapter => chapter.id));
     runAsyncAction(
       (async () => {
         await deps.deleteChapters(novel.pluginId, novel.id, _chapters);
@@ -279,7 +333,7 @@ export const deleteChaptersAction = (
 
         mutateChapters(chs =>
           chs.map(chapter => {
-            if (_chapters.some(_c => _c.id === chapter.id)) {
+            if (chapterIds.has(chapter.id)) {
               return {
                 ...chapter,
                 isDownloaded: false,
@@ -326,3 +380,18 @@ export const refreshChaptersAction = ({
     );
   }
 };
+
+/**
+ * Persists reading time only. The reader reports it every few seconds for as
+ * long as a chapter is open, and mirroring it into the in-memory chapter list
+ * would rebuild that list (and re-render every screen showing it) on each
+ * report - for a field no screen renders: the statistics screen aggregates
+ * `timeSpent` straight from the database.
+ */
+export function increaseTimeSpentAction(
+  chapterId: number,
+  timeSpent: number,
+  deps: ChapterActionsDependencies = defaultChapterActionsDependencies,
+) {
+  runAsyncAction(deps.increaseTimeSpent(chapterId, timeSpent), deps);
+}

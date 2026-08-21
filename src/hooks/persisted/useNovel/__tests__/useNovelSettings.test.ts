@@ -61,11 +61,12 @@ describe('useNovelSettings', () => {
       showChapterTitles: true,
       sort: 'nameDesc',
       filter: ['read'],
+      excludedScanlators: [],
     });
     expect(storeSetNovelSettings).toHaveBeenCalledTimes(1);
   });
 
-  it('falls back to app default sort and persists it when changing filter', async () => {
+  it('persists changes when changing filter', async () => {
     const storeSetNovelSettings = jest.fn();
     const storeNovelSettings = {
       filter: ['read'],
@@ -92,8 +93,8 @@ describe('useNovelSettings', () => {
 
     expect(storeSetNovelSettings).toHaveBeenCalledWith({
       showChapterTitles: true,
-      sort: 'positionAsc',
       filter: ['downloaded'],
+      excludedScanlators: [],
     });
   });
 
@@ -123,5 +124,44 @@ describe('useNovelSettings', () => {
     });
 
     expect(storeSetNovelSettings).not.toHaveBeenCalled();
+  });
+
+  it('preserves newer settings when cycling a filter after rerender', () => {
+    let storeNovelSettings = {
+      sort: 'positionAsc',
+      filter: [] as ['downloaded'] | [],
+      showChapterTitles: true,
+    };
+    const storeSetNovelSettings = jest.fn(nextSettings => {
+      storeNovelSettings = nextSettings;
+    });
+
+    mockUseNovelValue.mockImplementation(key => {
+      if (key === 'novel') return baseNovel;
+      if (key === 'novelSettings') return storeNovelSettings;
+      return undefined;
+    });
+    mockUseNovelAction.mockImplementation(key => {
+      if (key === 'setNovelSettings') return storeSetNovelSettings;
+      return undefined;
+    });
+
+    const { result, rerender } = renderHook(() => useNovelSettings());
+
+    act(() => {
+      result.current.setChapterSort('nameDesc');
+    });
+    rerender({});
+
+    act(() => {
+      result.current.cycleChapterFilter('downloaded');
+    });
+
+    expect(storeSetNovelSettings).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        sort: 'nameDesc',
+        filter: ['downloaded'],
+      }),
+    );
   });
 });

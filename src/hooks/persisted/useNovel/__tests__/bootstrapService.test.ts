@@ -1,6 +1,7 @@
 import '../../../__tests__/mocks';
 import { ChapterFilterKey, ChapterOrderKey } from '@database/constants';
 import { ChapterInfo, DBNovelInfo } from '@database/types';
+import { ChapterRow } from '@database/schema';
 import {
   getChapterCount,
   getChapterCountSync,
@@ -39,7 +40,10 @@ const mockNovel: DBNovelInfo = {
   lastUpdatedAt: null,
 };
 
-const makeChapter = (id: number, overrides: Partial<ChapterInfo> = {}) => ({
+const makeChapter = (
+  id: number,
+  overrides: Partial<ChapterRow> = {},
+): ChapterRow => ({
   id,
   novelId: mockNovel.id,
   name: `Chapter ${id}`,
@@ -53,8 +57,10 @@ const makeChapter = (id: number, overrides: Partial<ChapterInfo> = {}) => ({
   progress: 0,
   page: '1',
   position: id,
+  scanlator: null,
+  timeSpent: 0,
   ...overrides,
-  releaseTime: overrides.releaseTime || '2024-01-01',
+  releaseTime: overrides.releaseTime ?? '2024-01-01',
 });
 
 const mockChapters: ChapterInfo[] = [
@@ -143,6 +149,7 @@ describe('bootstrapService', () => {
       mockNovel.id,
       '1',
       settingsFilter,
+      undefined,
     );
   });
 
@@ -176,6 +183,9 @@ describe('bootstrapService', () => {
       settingsSort,
       settingsFilter,
       '1',
+      undefined,
+      undefined,
+      undefined,
     );
     expect(result.batchInformation.totalChapters).toBe(mockChapters.length);
   });
@@ -274,17 +284,70 @@ describe('bootstrapService', () => {
     if (!result.ok) return;
 
     expect(result.pages).toEqual(['1', '3']);
+    expect(result.pageIndex).toBe(1);
     expect(mockGetChapterCount).toHaveBeenCalledWith(
       mockNovel.id,
       '3',
       settingsFilter,
+      undefined,
     );
     expect(mockGetPageChaptersBatched).toHaveBeenCalledWith(
       mockNovel.id,
       settingsSort,
       settingsFilter,
       '3',
+      0,
+      undefined,
     );
+  });
+
+  it('clamps a persisted page index to the available pages', async () => {
+    setupDbFirstSuccess();
+    mockGetCustomPages.mockReturnValue([
+      { page: '1' },
+      { page: '3' },
+    ] as ReturnType<typeof getCustomPages>);
+    const service = createBootstrapService();
+
+    const result = await service.bootstrapNovelAsync({
+      novel: mockNovel,
+      novelPath: NOVEL_PATH,
+      pluginId: PLUGIN_ID,
+      pageIndex: 99,
+      settingsSort,
+      settingsFilter,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    expect(result.pageIndex).toBe(1);
+    expect(mockGetChapterCount).toHaveBeenCalledWith(
+      mockNovel.id,
+      '3',
+      settingsFilter,
+      undefined,
+    );
+  });
+
+  it('does not add an empty batch for an exact 1000 chapter page', async () => {
+    setupDbFirstSuccess();
+    mockGetChapterCount.mockResolvedValue(1000);
+    const service = createBootstrapService();
+
+    const result = await service.bootstrapNovelAsync({
+      novel: mockNovel,
+      novelPath: NOVEL_PATH,
+      pluginId: PLUGIN_ID,
+      pageIndex: 0,
+      settingsSort,
+      settingsFilter,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    expect(result.batchInformation.total).toBe(0);
   });
 
   it('getNextChapterBatch loads the next batch when available', async () => {
@@ -306,6 +369,7 @@ describe('bootstrapService', () => {
       settingsFilter,
       '1',
       1,
+      undefined,
     );
     expect(result).toEqual({
       batch: 1,
@@ -380,9 +444,12 @@ describe('bootstrapService', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.batchInformation.totalChapters).toBe(2);
-    expect(mockGetChapterCountSync).toHaveBeenCalledWith(mockNovel.id, '1', [
-      'not-read',
-    ]);
+    expect(mockGetChapterCountSync).toHaveBeenCalledWith(
+      mockNovel.id,
+      '1',
+      ['not-read'],
+      undefined,
+    );
   });
 
   it('bootstrapNovelSync returns missing-chapters only when unfiltered count is zero', () => {
@@ -409,5 +476,36 @@ describe('bootstrapService', () => {
       settingsFilter: ['not-read'],
     });
     expect(filtered.ok).toBe(true);
+  });
+
+  it('bootstrapNovelSync passes excludedScanlators down to queries', () => {
+    setupDbFirstSuccess();
+    const service = createBootstrapService();
+
+    const result = service.bootstrapNovelSync({
+      novel: mockNovel,
+      novelPath: NOVEL_PATH,
+      pluginId: PLUGIN_ID,
+      pageIndex: 0,
+      settingsSort,
+      settingsFilter: [],
+      excludedScanlators: ['Scan A'],
+    });
+
+    expect(result.ok).toBe(true);
+    expect(mockGetChapterCountSync).toHaveBeenCalledWith(
+      mockNovel.id,
+      '1',
+      [],
+      ['Scan A'],
+    );
+    expect(mockGetNovelChaptersSync).toHaveBeenCalledWith(
+      mockNovel.id,
+      settingsSort,
+      [],
+      '1',
+      1000,
+      ['Scan A'],
+    );
   });
 });

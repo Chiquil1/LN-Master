@@ -1,4 +1,3 @@
-/* eslint-disable react-native/no-inline-styles */
 import React, { useCallback } from 'react';
 import { BottomTabBarProps } from '@react-navigation/bottom-tabs';
 import { Pressable, View, StyleSheet } from 'react-native';
@@ -54,7 +53,7 @@ function CustomBottomTabBar({
         styles.container,
         {
           backgroundColor: theme.surface2 || theme.surface,
-          paddingBottom: insets?.bottom || 0,
+          paddingBottom: 16 + (insets?.bottom || 0),
         },
       ]}
     >
@@ -149,7 +148,6 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    paddingVertical: 6,
     paddingHorizontal: 4,
     position: 'relative',
   },

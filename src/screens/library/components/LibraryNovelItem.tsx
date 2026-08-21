@@ -1,4 +1,4 @@
-import React, { memo, useCallback } from 'react';
+import { memo, useCallback } from 'react';
 import NovelCover from '@components/NovelCover';
 import { NovelInfo } from '@database/types';
 import { ThemeColors } from '@theme/types';
@@ -14,7 +14,7 @@ interface LibraryNovelItemProps {
   imageRequestInit: ImageRequestInit | undefined;
 }
 
-function LibraryNovelItemComponent({
+const LibraryNovelItem = memo(function LibraryNovelItem_({
   item,
   theme,
   isSelected,
@@ -47,16 +47,6 @@ function LibraryNovelItemComponent({
       imageRequestInit={imageRequestInit}
     />
   );
-}
+});
 
-const areEqual = (prev: LibraryNovelItemProps, next: LibraryNovelItemProps) => {
-  return (
-    prev.item.id === next.item.id &&
-    prev.isSelected === next.isSelected &&
-    prev.hasSelection === next.hasSelection &&
-    prev.theme === next.theme &&
-    prev.imageRequestInit === next.imageRequestInit
-  );
-};
-
-export default memo(LibraryNovelItemComponent, areEqual);
+export default LibraryNovelItem;

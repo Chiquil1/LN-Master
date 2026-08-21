@@ -13,11 +13,11 @@ import {
   StatusBar,
 } from 'react-native';
 import WebView from 'react-native-webview';
+import * as Linking from 'expo-linking';
 import color from 'color';
-import { load } from 'cheerio';
 
 import { useTheme } from '@hooks/persisted';
-import { getString } from '@strings/translations';
+import { getString } from '@i18n/translations';
 
 import { getPlugin } from '@plugins/pluginManager';
 import { MMKVStorage, getMMKVObject } from '@utils/mmkv/mmkv';
@@ -29,94 +29,33 @@ import {
   initialChapterGeneralSettings,
   initialChapterReaderSettings,
 } from '@hooks/persisted/useSettings';
-import { getBatteryLevelSync } from 'react-native-device-info';
+import { getBatteryLevel } from 'react-native-device-info';
 import { PLUGIN_STORAGE } from '@utils/Storages';
-import NativeTTSMediaControl from '@specs/NativeTTSMediaControl';
 import { useChapterContext } from '../ChapterContext';
-import { useTTSStore } from '@hooks/useTTSStore';
+import { ReaderSearchResult } from '../types';
+import { useTtsSession } from '../hooks/useTtsSession';
+import type { TtsParagraph, TtsSettings } from '@modules/nitro-tts';
+import { ChapterInfo } from '@database/types';
+import { isPluginIssueReportUrl } from '../utils/sanitizeChapterText';
 import {
-  showTTSNotification,
-  updateTTSNotification,
-  updateTTSPlaybackState,
-  updateTTSProgress,
-  ttsMediaEmitter,
-} from '@utils/ttsNotification';
-import { registerTTSWebView, unregisterTTSWebView } from '@utils/ttsService';
+  createTtsParagraphs,
+  decodeTtsParagraphId,
+  extractTtsSegments,
+} from '../utils/ttsQueue';
+import type { PreparedTTSChapter } from '../hooks/useChapter';
 
 type WebViewPostEvent = {
   type: string;
-  data?: { [key: string]: unknown };
+  data?: unknown;
   autoStartTTS?: boolean;
-  index?: number;
-  total?: number;
 };
 
 type WebViewReaderProps = {
   onPress(): void;
+  onTouchStart?(): void;
+  onSearchResult(result: ReaderSearchResult): void;
+  searchTextRef: React.MutableRefObject<string>;
 };
-
-type BufferedTTSQueueItem = {
-  chapterId: number;
-  chapterName: string;
-  novelId: number;
-  textSegments: string[];
-  currentIndex: number;
-};
-
-type NativeTTSChapter = {
-  chapterId: number;
-  chapterName: string;
-  novelName: string;
-  coverUri: string;
-  segments: string[];
-};
-
-type NativeTTSPlaybackRequest = {
-  chapters: NativeTTSChapter[];
-  chapterIndex: number;
-  segmentIndex: number;
-  voiceIdentifier: string;
-  language: string;
-  rate: number;
-  pitch: number;
-  sessionId: number;
-};
-
-type NativeTTSErrorKind =
-  | 'network'
-  | 'network_timeout'
-  | 'voice_not_installed'
-  | 'service'
-  | 'synthesis'
-  | 'output'
-  | 'invalid_request'
-  | 'generic';
-
-type NativeTTSProgressEvent = {
-  position?: number;
-  total?: number;
-  chapterIndex?: number;
-  chapterId?: number;
-};
-
-type NativeTTSChapterBoundaryEvent = NativeTTSProgressEvent & {
-  message?: 'next' | 'previous' | string;
-};
-
-type NativeTTSErrorEvent = NativeTTSProgressEvent & {
-  message?: string;
-  code?: number;
-  kind?: NativeTTSErrorKind;
-  requiresNetwork?: boolean;
-};
-
-const TTS_RETRY_DELAY_MS = 750;
-const TTS_MAX_RETRIES = 1;
-// Mantener la ventana nativa alineada con el prefetch del hook reduce los
-// cortes al pasar a segundo plano antes de que JS vuelva a pedir más cola.
-const TTS_CHAPTER_BUFFER_SIZE = 10;
-const TTS_MAX_SEGMENT_LENGTH = 3000;
-const TTS_CHAPTER_PREFETCH_THRESHOLD = 2;
 
 const onLogMessage = (payload: { nativeEvent: { data: string } }) => {
   const dataPayload = JSON.parse(payload.nativeEvent.data);
@@ -128,14 +67,100 @@ const onLogMessage = (payload: { nativeEvent: { data: string } }) => {
   }
 };
 
+/** Checks whether two TTS settings objects are equal */
+const areTTSSettingsEqual = (
+  a: ChapterReaderSettings['tts'],
+  b: ChapterReaderSettings['tts'],
+) => {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.rate === b.rate &&
+    a.pitch === b.pitch &&
+    a.autoPageAdvance === b.autoPageAdvance &&
+    a.scrollToTop === b.scrollToTop &&
+    a.voice?.identifier === b.voice?.identifier &&
+    a.engine?.name === b.engine?.name
+  );
+};
+
+const toNativeTtsSettings = (
+  settings: ChapterReaderSettings['tts'],
+): TtsSettings => ({
+  engineName: settings?.engine?.name,
+  voiceIdentifier: settings?.voice?.identifier,
+  rate: settings?.rate ?? 1,
+  pitch: settings?.pitch ?? 1,
+});
+
+/**
+ * The adjacent chapters are resolved after the chapter itself is on screen, so
+ * they are pushed into the loaded page instead of being baked into the HTML –
+ * rebuilding the HTML would reload the WebView and lose the reading position.
+ */
+const buildAdjacentChapterScript = (
+  nextChapter?: ChapterInfo,
+  prevChapter?: ChapterInfo,
+) => `
+  window.reader?.setAdjacentChapters?.(${JSON.stringify({
+    nextChapter,
+    prevChapter,
+    strings: {
+      nextChapter: getString('readerScreen.nextChapter', {
+        name: nextChapter?.name,
+      }),
+    },
+  })});
+  true;
+`;
+
 const { RNDeviceInfo } = NativeModules;
 const deviceInfoEmitter = new NativeEventEmitter(RNDeviceInfo);
+
+/**
+ * Last level seen, so a chapter can be rendered without the synchronous native
+ * call the sync variant of this API performs. It is refreshed asynchronously
+ * and pushed into the page, which also happens on every battery change event.
+ */
+let lastKnownBatteryLevel = 0;
 
 const assetsUriPrefix = __DEV__
   ? 'http://localhost:8081/assets'
   : 'file:///android_asset';
 
-const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
+const TTS_CHAPTER_BUFFER_SIZE = 10;
+const TTS_CHAPTER_PREFETCH_THRESHOLD = 3;
+
+const buildTtsWebViewSyncScript = (
+  paragraphIndex: number,
+  playbackState: string,
+) => `
+  (function() {
+    if (!window.tts || !window.reader?.chapterElement) { return true; }
+    if (!Array.isArray(tts.allReadableElements) || tts.allReadableElements.length === 0) {
+      var entries = tts.getAllReadableElements(reader.chapterElement)
+        .map(function(element) {
+          return { element: element, text: tts.normalizeText(element.innerText) };
+        })
+        .filter(function(entry) { return !!entry.text; });
+      tts.allReadableElements = entries.map(function(entry) { return entry.element; });
+      tts.textQueue = entries.map(function(entry) { return entry.text; });
+      tts.totalElements = tts.allReadableElements.length;
+    }
+    if (tts.allReadableElements.length > 0) {
+      tts.setActiveIndex(${paragraphIndex});
+      tts.setPlaybackState(${JSON.stringify(playbackState)});
+    }
+    return true;
+  })();
+`;
+
+const WebViewReader: React.FC<WebViewReaderProps> = ({
+  onPress,
+  onTouchStart,
+  onSearchResult,
+  searchTextRef,
+}) => {
   const {
     novel,
     chapter,
@@ -145,2012 +170,380 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
     nextChapter,
     prevChapter,
     webViewRef,
+    getChapter,
     prepareTTSChapterQueue,
+    onUserInteraction,
+    isTTSReadingRef,
   } = useChapterContext();
   const theme = useTheme();
-  const [readerSettings, setReaderSettings] = useState<ChapterReaderSettings>(
+  const initialReaderSettings = useMemo(
     () =>
       getMMKVObject<ChapterReaderSettings>(CHAPTER_READER_SETTINGS) ||
       initialChapterReaderSettings,
-  );
-  const chapterGeneralSettings = useMemo(
-    () =>
-      getMMKVObject<ChapterGeneralSettings>(CHAPTER_GENERAL_SETTINGS) ||
-      initialChapterGeneralSettings,
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [chapter.id],
   );
 
-  useEffect(() => {
-    setReaderSettings(
-      getMMKVObject<ChapterReaderSettings>(CHAPTER_READER_SETTINGS) ||
-        initialChapterReaderSettings,
-    );
-  }, [chapter.id]);
+  const chapterGeneralSettings = useMemo(
+    () =>
+      getMMKVObject<ChapterGeneralSettings>(CHAPTER_GENERAL_SETTINGS) ||
+      initialChapterGeneralSettings,
+    // needed to preserve settings during chapter change
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [chapter.id],
+  );
 
-  const batteryLevel = useMemo(() => getBatteryLevelSync(), []);
+  const [batteryLevel] = useState(lastKnownBatteryLevel);
   const plugin = getPlugin(novel?.pluginId);
   const pluginCustomJS = `file://${PLUGIN_STORAGE}/${plugin?.id}/custom.js`;
   const pluginCustomCSS = `file://${PLUGIN_STORAGE}/${plugin?.id}/custom.css`;
   const nextChapterScreenVisible = useRef<boolean>(false);
   const autoStartTTSRef = useRef<boolean>(false);
-  const isTTSReadingRef = useRef<boolean>(false);
-  const readerSettingsRef = useRef<ChapterReaderSettings>(readerSettings);
-  const appStateRef = useRef(AppState.currentState);
-  const isSpeakingRef = useRef<boolean>(false);
-  const nativePlaybackStartedRef = useRef<boolean>(false);
-  const nativePlaybackPausedRef = useRef<boolean>(false);
-  const isAutoStartingRef = useRef<boolean>(false);
-  const isTransitioningRef = useRef<boolean>(false);
-  const ttsSegmentsRef = useRef<string[]>([]);
-  const ttsIndexRef = useRef<number>(0);
-  const ttsChapterIdRef = useRef<number | null>(null);
-  const speechSessionRef = useRef<number>(0);
-  const pendingNavigationRef = useRef<'NEXT' | 'PREV' | null>(null);
-  const pendingNativeChapterIndexRef = useRef<number | null>(null);
-  const ttsRetryCountRef = useRef<number>(0);
-  const ttsFallbackVoiceRef = useRef<boolean>(false);
-  const ttsRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const bufferedTTSQueueRef = useRef<BufferedTTSQueueItem[]>([]);
-  const nextNativeQueuePreparationRef = useRef<{
-    anchorChapterId: number | null;
-    promise: Promise<BufferedTTSQueueItem[]> | null;
-  } | null>(null);
-  const ttsQueuePreparationRef = useRef<Promise<BufferedTTSQueueItem[]> | null>(
-    null,
-  );
-  const nativeBoundaryRefillRef = useRef<
-    ((event: NativeTTSChapterBoundaryEvent) => void) | null
-  >(null);
-  const nativeBoundaryRefillPromiseRef = useRef<Promise<void> | null>(null);
-  const lastTTSPlaybackRef = useRef<NativeTTSPlaybackRequest | null>(null);
-
+  const activeChapterIdRef = useRef(chapter.id);
+  const adjacentChapterScriptRef = useRef(buildAdjacentChapterScript());
   const {
-    queue: ttsQueue,
-    currentChapterIndex: ttsCurrentChapterIndex,
-    setQueue: setTTSQueue,
-    clearQueue: clearTTSQueue,
-    setCurrentChapterIndex: setTTSCurrentChapterIndex,
-    setIsPlaying: setTTSIsPlaying,
-    updateCurrentItemCurrentIndex,
-  } = useTTSStore();
+    appendToQueue,
+    command: runTtsCommand,
+    loadAndPlay,
+    progress: ttsProgress,
+    seekTo: seekTts,
+    state: ttsState,
+    updateSettings: updateTtsSettings,
+  } = useTtsSession();
 
-  const currentTTSItem = ttsQueue[ttsCurrentChapterIndex];
-  const currentTTSIndex = currentTTSItem?.currentIndex ?? 0;
-  const currentTTSSegments = useMemo(
-    () => currentTTSItem?.textSegments ?? [],
-    [currentTTSItem],
+  const [readerSettings, setReaderSettings] = useState(
+    () =>
+      getMMKVObject<ChapterReaderSettings>(CHAPTER_READER_SETTINGS) ||
+      initialChapterReaderSettings,
   );
+
+  const readerSettingsRef = useRef<ChapterReaderSettings>(readerSettings);
+  const ttsSessionGenerationRef = useRef(0);
+  const ttsStateRef = useRef(ttsState);
+  const queuedChapterIdsRef = useRef<number[]>([]);
+  const queuedChaptersRef = useRef<Map<number, ChapterInfo>>(new Map());
+  const queuedParagraphsRef = useRef<TtsParagraph[]>([]);
+  const queueExpansionRef = useRef<Promise<void> | null>(null);
+  const expandingAnchorIdRef = useRef<number | null>(null);
+  const expandedAnchorIdsRef = useRef<Set<number>>(new Set());
+  const nativeNavigationTargetRef = useRef<number | null>(null);
+  const pendingVisibleTtsChapterRef = useRef<ChapterInfo | null>(null);
 
   useEffect(() => {
     readerSettingsRef.current = readerSettings;
   }, [readerSettings]);
 
-  useEffect(() => {
-    ttsSegmentsRef.current = currentTTSSegments;
-    ttsIndexRef.current = currentTTSIndex;
-  }, [currentTTSIndex, currentTTSSegments]);
+  const appendPreparedChapters = useCallback(
+    async (preparedChapters: PreparedTTSChapter[], generation: number) => {
+      const knownChapterIds = new Set(queuedChapterIdsRef.current);
+      const newChapters = preparedChapters.filter(
+        item => !knownChapterIds.has(item.chapter.id),
+      );
+      const paragraphs: TtsParagraph[] = [];
+      const acceptedChapters: ChapterInfo[] = [];
 
-  useEffect(() => {
-    const nativeTransitionInProgress =
-      nativePlaybackStartedRef.current &&
-      (pendingNativeChapterIndexRef.current !== null ||
-        ttsChapterIdRef.current === chapter.id);
-
-    if (nativeTransitionInProgress) {
-      autoStartTTSRef.current = false;
-      isAutoStartingRef.current = false;
-      isTransitioningRef.current = false;
-      pendingNavigationRef.current = null;
-      return;
-    }
-
-    speechSessionRef.current += 1;
-    isSpeakingRef.current = false;
-    isAutoStartingRef.current = false;
-    nativePlaybackStartedRef.current = false;
-    nativePlaybackPausedRef.current = false;
-    ttsSegmentsRef.current = [];
-    ttsIndexRef.current = 0;
-    ttsChapterIdRef.current = null;
-    ttsRetryCountRef.current = 0;
-    ttsFallbackVoiceRef.current = false;
-    bufferedTTSQueueRef.current = [];
-    clearNextNativeQueuePreparation();
-    ttsQueuePreparationRef.current = null;
-    nativeBoundaryRefillPromiseRef.current = null;
-    pendingNativeChapterIndexRef.current = null;
-    lastTTSPlaybackRef.current = null;
-
-    if (ttsRetryTimerRef.current) {
-      clearTimeout(ttsRetryTimerRef.current);
-      ttsRetryTimerRef.current = null;
-    }
-  }, [chapter.id]);
-
-  const requestChapterNavigation = useCallback(
-    (position: 'NEXT' | 'PREV') => {
-      const targetChapter = position === 'NEXT' ? nextChapter : prevChapter;
-
-      if (!targetChapter || isTransitioningRef.current) {
-        if (!targetChapter) {
-          autoStartTTSRef.current = false;
-          isTransitioningRef.current = false;
-          isTTSReadingRef.current = false;
-          setTTSIsPlaying(false);
-          updateTTSPlaybackState(false);
-          webViewRef.current?.injectJavaScript(`
-            if (window.tts) { tts.stop(); }
-            true;
-          `);
+      newChapters.forEach(item => {
+        const chapterParagraphs = createTtsParagraphs(
+          item.chapter.id,
+          item.chapter.name,
+          extractTtsSegments(item.chapterText),
+        );
+        if (chapterParagraphs.length > 0) {
+          acceptedChapters.push(item.chapter);
+          paragraphs.push(...chapterParagraphs);
         }
+      });
+
+      if (
+        paragraphs.length === 0 ||
+        generation !== ttsSessionGenerationRef.current
+      ) {
         return;
       }
 
-      isTransitioningRef.current = true;
-      isAutoStartingRef.current = false;
-      autoStartTTSRef.current = true;
-      pendingNavigationRef.current = position;
-      pendingNativeChapterIndexRef.current = null;
+      acceptedChapters.forEach(item => {
+        queuedChaptersRef.current.set(item.id, item);
+      });
+      queuedChapterIdsRef.current = [
+        ...queuedChapterIdsRef.current,
+        ...acceptedChapters.map(item => item.id),
+      ];
+      queuedParagraphsRef.current = [
+        ...queuedParagraphsRef.current,
+        ...paragraphs,
+      ];
 
-      // Invalida todos los callbacks del párrafo o capítulo anterior.
-      speechSessionRef.current += 1;
-      NativeTTSMediaControl.stopNativePlayback();
-      isSpeakingRef.current = false;
-      nativePlaybackStartedRef.current = false;
-      nativePlaybackPausedRef.current = false;
-      ttsRetryCountRef.current = 0;
-      ttsFallbackVoiceRef.current = false;
-      pendingNativeChapterIndexRef.current = null;
-      lastTTSPlaybackRef.current = null;
+      await appendToQueue(
+        paragraphs,
+        {
+          novelName: novel?.name || 'Unknown',
+          chapterName: acceptedChapters[0]?.name || chapter.name,
+          coverUri: novel?.cover || undefined,
+        },
+        toNativeTtsSettings(readerSettingsRef.current.tts),
+      );
 
-      if (ttsRetryTimerRef.current) {
-        clearTimeout(ttsRetryTimerRef.current);
-        ttsRetryTimerRef.current = null;
-      }
-
-      const navigateWhenActive = () => {
-        if (pendingNavigationRef.current !== position) {
-          return;
-        }
-
-        // Android puede suspender el WebView con la pantalla apagada.
-        // Conservamos la navegación pendiente hasta volver al primer plano.
-        if (appStateRef.current !== 'active') {
-          return;
-        }
-
-        pendingNavigationRef.current = null;
-        navigateChapter(position);
-      };
-
-      if (appStateRef.current === 'active') {
-        setTimeout(navigateWhenActive, 500);
+      if (generation !== ttsSessionGenerationRef.current) {
+        
       }
     },
-    [navigateChapter, nextChapter, prevChapter, setTTSIsPlaying, webViewRef],
+    [appendToQueue, chapter.name, novel?.cover, novel?.name],
   );
 
-  const tryAutoStartTTS = useCallback(() => {
-    if (
-      !autoStartTTSRef.current ||
-      isAutoStartingRef.current ||
-      appStateRef.current !== 'active'
-    ) {
-      return;
-    }
-
-    isAutoStartingRef.current = true;
-    const chapterId = chapter.id;
-
-    // Se conserva la pausa de 500 ms solicitada para que el capítulo termine
-    // de montar antes de iniciar su primer párrafo.
-    setTimeout(() => {
-      if (!autoStartTTSRef.current || appStateRef.current !== 'active') {
-        isAutoStartingRef.current = false;
+  const requestTtsQueueExpansion = useCallback(
+    (anchorChapterId: number, includeAnchor: boolean) => {
+      if (
+        expandedAnchorIdsRef.current.has(anchorChapterId) ||
+        expandingAnchorIdRef.current === anchorChapterId
+      ) {
         return;
       }
 
-      webViewRef.current?.injectJavaScript(`
-        (function waitForTTSReady(attempt) {
-          const readerReady =
-            window.reader &&
-            window.reader.generalSettings &&
-            window.reader.generalSettings.val;
-          const ttsReady =
-            window.tts && typeof window.tts.start === 'function';
-
-          if (
-            readerReady &&
-            ttsReady &&
-            window.reader.generalSettings.val.TTSEnable
-          ) {
-            window.tts.start();
-
-            const controller = document.getElementById('TTS-Controller');
-            if (controller && controller.firstElementChild) {
-              controller.firstElementChild.innerHTML = pauseIcon;
-            }
-
-            window.ReactNativeWebView.postMessage(
-              JSON.stringify({
-                type: 'tts-auto-started',
-                data: { chapterId: ${chapterId} },
-              }),
-            );
-            return;
+      const generation = ttsSessionGenerationRef.current;
+      expandedAnchorIdsRef.current.add(anchorChapterId);
+      expandingAnchorIdRef.current = anchorChapterId;
+      const expansion: Promise<void> = prepareTTSChapterQueue(
+        TTS_CHAPTER_BUFFER_SIZE,
+        anchorChapterId,
+        includeAnchor,
+      )
+        .then(prepared => appendPreparedChapters(prepared, generation))
+        .catch(() => {
+          expandedAnchorIdsRef.current.delete(anchorChapterId);
+        })
+        .finally(() => {
+          if (queueExpansionRef.current === expansion) {
+            queueExpansionRef.current = null;
           }
-
-          if (attempt < 50) {
-            setTimeout(function() {
-              waitForTTSReady(attempt + 1);
-            }, 100);
-            return;
+          if (expandingAnchorIdRef.current === anchorChapterId) {
+            expandingAnchorIdRef.current = null;
           }
-
-          window.ReactNativeWebView.postMessage(
-            JSON.stringify({
-              type: 'tts-auto-start-failed',
-              data: { chapterId: ${chapterId} },
-            }),
-          );
-        })(0);
-        true;
-      `);
-    }, 500);
-  }, [chapter.id, webViewRef]);
-
-  const syncVisibleChapterToNativeQueue = useCallback(() => {
-    if (appStateRef.current !== 'active') {
-      return;
-    }
-
-    const targetIndex = pendingNativeChapterIndexRef.current;
-
-    if (targetIndex === null) {
-      return;
-    }
-
-    const queue = useTTSStore.getState().queue;
-    const targetItem = queue[targetIndex];
-
-    if (!targetItem) {
-      pendingNativeChapterIndexRef.current = null;
-      return;
-    }
-
-    if (targetItem.chapterId === chapter.id) {
-      pendingNativeChapterIndexRef.current = null;
-      return;
-    }
-
-    const visibleIndex = queue.findIndex(item => item.chapterId === chapter.id);
-
-    if (visibleIndex >= 0) {
-      const direction = targetIndex > visibleIndex ? 'NEXT' : 'PREV';
-      const adjacentChapter = direction === 'NEXT' ? nextChapter : prevChapter;
-
-      if (adjacentChapter) {
-        navigateChapter(direction);
-      }
-      return;
-    }
-
-    if (nextChapter?.id === targetItem.chapterId) {
-      navigateChapter('NEXT');
-    } else if (prevChapter?.id === targetItem.chapterId) {
-      navigateChapter('PREV');
-    }
-  }, [chapter.id, navigateChapter, nextChapter, prevChapter]);
-
-  useEffect(() => {
-    if (
-      pendingNativeChapterIndexRef.current !== null &&
-      appStateRef.current === 'active'
-    ) {
-      const timer = setTimeout(syncVisibleChapterToNativeQueue, 100);
-      return () => clearTimeout(timer);
-    }
-
-    return undefined;
-  }, [chapter.id, syncVisibleChapterToNativeQueue]);
-
-  useEffect(() => {
-    registerTTSWebView(webViewRef);
-    return () => {
-      unregisterTTSWebView();
-    };
-  }, [webViewRef]);
-
-  useEffect(() => {
-    const playListener = ttsMediaEmitter.addListener('TTSPlay', () => {
-      nativePlaybackPausedRef.current = false;
-      isSpeakingRef.current = true;
-
-      if (nativePlaybackStartedRef.current) {
-        NativeTTSMediaControl.resumePlayback();
-      } else {
-        const lastPlayback = lastTTSPlaybackRef.current;
-
-        if (
-          lastPlayback &&
-          lastPlayback.sessionId === speechSessionRef.current &&
-          ttsSegmentsRef.current.length > 0
-        ) {
-          const restartIndex = Math.min(
-            Math.max(ttsIndexRef.current, 0),
-            ttsSegmentsRef.current.length - 1,
-          );
-
-          ttsRetryCountRef.current = 0;
-          nativePlaybackStartedRef.current = true;
-
-          NativeTTSMediaControl.startChapterQueue(
-            JSON.stringify(lastPlayback.chapters),
-            lastPlayback.chapterIndex,
-            restartIndex,
-            ttsFallbackVoiceRef.current ? '' : lastPlayback.voiceIdentifier,
-            lastPlayback.language,
-            lastPlayback.rate,
-            lastPlayback.pitch,
-          );
-        }
-      }
-
-      webViewRef.current?.injectJavaScript(`
-        if (window.tts && !tts.reading) { tts.resume(); }
-        true;
-      `);
-    });
-
-    const pauseListener = ttsMediaEmitter.addListener('TTSPause', () => {
-      nativePlaybackPausedRef.current = true;
-      isSpeakingRef.current = false;
-      NativeTTSMediaControl.pausePlayback();
-      webViewRef.current?.injectJavaScript(`
-        if (window.tts && tts.reading) { tts.pause(); }
-        true;
-      `);
-    });
-
-    const stopListener = ttsMediaEmitter.addListener('TTSStop', () => {
-      speechSessionRef.current += 1;
-      nativePlaybackStartedRef.current = false;
-      nativePlaybackPausedRef.current = false;
-      isSpeakingRef.current = false;
-      ttsRetryCountRef.current = 0;
-      ttsFallbackVoiceRef.current = false;
-      lastTTSPlaybackRef.current = null;
-      clearNextNativeQueuePreparation();
-
-      if (ttsRetryTimerRef.current) {
-        clearTimeout(ttsRetryTimerRef.current);
-        ttsRetryTimerRef.current = null;
-      }
-
-      webViewRef.current?.injectJavaScript(`
-        if (window.tts) { tts.stop(); }
-        true;
-      `);
-    });
-
-    const rewindListener = ttsMediaEmitter.addListener('TTSRewind', () => {
-      // El servicio reinicia el párrafo actual y emitirá TTSNativeSegment
-      // cuando comience. Evitamos reiniciar también el motor del WebView.
-      nativePlaybackPausedRef.current = false;
-    });
-
-    const prevListener = ttsMediaEmitter.addListener('TTSPrev', () => {
-      requestChapterNavigation('PREV');
-    });
-
-    const nextListener = ttsMediaEmitter.addListener('TTSNext', () => {
-      requestChapterNavigation('NEXT');
-    });
-
-    const chapterBoundaryListener = ttsMediaEmitter.addListener(
-      'TTSNativeChapterBoundary',
-      (event: NativeTTSChapterBoundaryEvent) => {
-        nativeBoundaryRefillRef.current?.(event);
-      },
-    );
-
-    const chapterChangedListener = ttsMediaEmitter.addListener(
-      'TTSNativeChapterChanged',
-      (event: NativeTTSProgressEvent) => {
-        const storeState = useTTSStore.getState();
-        const queue = storeState.queue;
-
-        let nativeChapterIndex =
-          typeof event.chapterIndex === 'number' ? event.chapterIndex : -1;
-
-        if (
-          (nativeChapterIndex < 0 || nativeChapterIndex >= queue.length) &&
-          typeof event.chapterId === 'number'
-        ) {
-          nativeChapterIndex = queue.findIndex(
-            item => item.chapterId === event.chapterId,
-          );
-        }
-
-        const nativeQueueItem = queue[nativeChapterIndex];
-
-        if (!nativeQueueItem) {
-          return;
-        }
-
-        const segmentIndex =
-          typeof event.position === 'number' && event.position >= 0
-            ? Math.min(
-                event.position,
-                Math.max(nativeQueueItem.textSegments.length - 1, 0),
-              )
-            : 0;
-
-        setTTSCurrentChapterIndex(nativeChapterIndex);
-        ttsSegmentsRef.current = nativeQueueItem.textSegments;
-        ttsChapterIdRef.current = nativeQueueItem.chapterId;
-        ttsIndexRef.current = segmentIndex;
-        updateCurrentItemCurrentIndex(segmentIndex);
-
-        const currentPlayback = lastTTSPlaybackRef.current;
-        if (currentPlayback) {
-          lastTTSPlaybackRef.current = {
-            ...currentPlayback,
-            chapterIndex: nativeChapterIndex,
-            segmentIndex,
-          };
-        }
-
-        nativePlaybackStartedRef.current = true;
-        nativePlaybackPausedRef.current = false;
-        isSpeakingRef.current = true;
-        isTTSReadingRef.current = true;
-        setTTSIsPlaying(true);
-
-        pendingNativeChapterIndexRef.current = nativeChapterIndex;
-        maybePrefetchNextNativeQueue(queue, nativeChapterIndex);
-
-        if (appStateRef.current === 'active') {
-          setTimeout(syncVisibleChapterToNativeQueue, 50);
-        }
-      },
-    );
-
-    const seekToListener = ttsMediaEmitter.addListener(
-      'TTSSeekTo',
-      (event: { position: number }) => {
-        const position = event.position;
-        webViewRef.current?.injectJavaScript(`
-          if (window.tts && tts.started) { tts.seekTo(${position}); }
-          true;
-        `);
-      },
-    );
-
-    const segmentListener = ttsMediaEmitter.addListener(
-      'TTSNativeSegment',
-      (event: NativeTTSProgressEvent) => {
-        const storeState = useTTSStore.getState();
-        const queue = storeState.queue;
-
-        let nativeChapterIndex =
-          typeof event.chapterIndex === 'number' ? event.chapterIndex : -1;
-
-        if (
-          (nativeChapterIndex < 0 || nativeChapterIndex >= queue.length) &&
-          typeof event.chapterId === 'number'
-        ) {
-          nativeChapterIndex = queue.findIndex(
-            item => item.chapterId === event.chapterId,
-          );
-        }
-
-        if (nativeChapterIndex < 0 || nativeChapterIndex >= queue.length) {
-          nativeChapterIndex = storeState.currentChapterIndex;
-        }
-
-        const nativeQueueItem = queue[nativeChapterIndex];
-        const index = event.position;
-
-        if (
-          !nativeQueueItem ||
-          typeof index !== 'number' ||
-          index < 0 ||
-          index >= nativeQueueItem.textSegments.length
-        ) {
-          return;
-        }
-
-        setTTSCurrentChapterIndex(nativeChapterIndex);
-        ttsSegmentsRef.current = nativeQueueItem.textSegments;
-        ttsChapterIdRef.current = nativeQueueItem.chapterId;
-        ttsIndexRef.current = index;
-        updateCurrentItemCurrentIndex(index);
-
-        const currentPlayback = lastTTSPlaybackRef.current;
-        if (currentPlayback) {
-          lastTTSPlaybackRef.current = {
-            ...currentPlayback,
-            chapterIndex: nativeChapterIndex,
-            segmentIndex: index,
-          };
-        }
-
-        nativePlaybackStartedRef.current = true;
-        nativePlaybackPausedRef.current = false;
-        isSpeakingRef.current = true;
-        isTTSReadingRef.current = true;
-        ttsRetryCountRef.current = 0;
-        setTTSIsPlaying(true);
-
-        updateTTSProgress(
-          index,
-          typeof event.total === 'number' && event.total > 0
-            ? event.total
-            : nativeQueueItem.textSegments.length,
-        );
-
-        // Android puede cambiar de capítulo sin depender del WebView.
-        // Si la pantalla está mostrando otro capítulo, dejamos pendiente la
-        // navegación visual; el audio nativo continúa sin interrupciones.
-        if (nativeQueueItem.chapterId !== chapter.id) {
-          pendingNativeChapterIndexRef.current = nativeChapterIndex;
-          maybePrefetchNextNativeQueue(queue, nativeChapterIndex);
-
-          if (appStateRef.current === 'active') {
-            setTimeout(syncVisibleChapterToNativeQueue, 50);
-          }
-          return;
-        }
-
-        pendingNativeChapterIndexRef.current = null;
-
-        webViewRef.current?.injectJavaScript(`
-          (function() {
-            if (!window.tts || !window.tts.allReadableElements) { return; }
-            var idx = ${index};
-            if (idx >= tts.allReadableElements.length) { return; }
-            if (tts.currentElement) {
-              tts.currentElement.classList.remove('highlight');
-            }
-            tts.elementsRead = idx;
-            tts.currentElement = tts.allReadableElements[idx];
-            tts.prevElement = null;
-            tts.started = true;
-            tts.reading = true;
-            tts.currentElement.classList.add('highlight');
-            tts.scrollToElement(tts.currentElement);
-          })();
-          true;
-        `);
-      },
-    );
-
-    const queueFinishedListener = ttsMediaEmitter.addListener(
-      'TTSNativeQueueFinished',
-      () => {
-        if (!nativePlaybackStartedRef.current) {
-          return;
-        }
-
-        // Este evento queda reservado para la cola antigua de un solo capítulo.
-        // startChapterQueue usa autoavance + TTSNativeChapterBoundary.
-        nativePlaybackStartedRef.current = false;
-        nativePlaybackPausedRef.current = false;
-        isSpeakingRef.current = false;
-        isTTSReadingRef.current = false;
-        setTTSIsPlaying(false);
-        clearTTSQueue();
-        setTTSCurrentChapterIndex(0);
-        updateTTSPlaybackState(false);
-        clearNextNativeQueuePreparation();
-        NativeTTSMediaControl.stopNativePlayback();
-        webViewRef.current?.injectJavaScript(`
-          if (window.tts) { tts.stop(); }
-          true;
-        `);
-      },
-    );
-
-    const nativeErrorListener = ttsMediaEmitter.addListener(
-      'TTSNativeError',
-      (event: NativeTTSErrorEvent) => {
-        const playback = lastTTSPlaybackRef.current;
-        const currentSession = speechSessionRef.current;
-        const errorKind = event.kind ?? 'generic';
-
-        const isNetworkError =
-          errorKind === 'network' || errorKind === 'network_timeout';
-
-        const storeState = useTTSStore.getState();
-        const queue = storeState.queue;
-
-        let nativeChapterIndex =
-          typeof event.chapterIndex === 'number' ? event.chapterIndex : -1;
-
-        if (
-          (nativeChapterIndex < 0 || nativeChapterIndex >= queue.length) &&
-          typeof event.chapterId === 'number'
-        ) {
-          nativeChapterIndex = queue.findIndex(
-            item => item.chapterId === event.chapterId,
-          );
-        }
-
-        if (nativeChapterIndex < 0 || nativeChapterIndex >= queue.length) {
-          nativeChapterIndex = storeState.currentChapterIndex;
-        }
-
-        const nativeQueueItem = queue[nativeChapterIndex];
-
-        if (nativeQueueItem) {
-          setTTSCurrentChapterIndex(nativeChapterIndex);
-          ttsSegmentsRef.current = nativeQueueItem.textSegments;
-          ttsChapterIdRef.current = nativeQueueItem.chapterId;
-
-          if (
-            typeof event.position === 'number' &&
-            event.position >= 0 &&
-            event.position < nativeQueueItem.textSegments.length
-          ) {
-            ttsIndexRef.current = event.position;
-            updateCurrentItemCurrentIndex(event.position);
-          }
-
-          const currentPlayback = lastTTSPlaybackRef.current;
-          if (currentPlayback) {
-            lastTTSPlaybackRef.current = {
-              ...currentPlayback,
-              chapterIndex: nativeChapterIndex,
-              segmentIndex: ttsIndexRef.current,
-            };
-          }
-        }
-
-        console.warn('[TTS] Error del motor nativo:', {
-          message: event.message,
-          code: event.code,
-          kind: errorKind,
-          requiresNetwork: event.requiresNetwork,
-          chapterIndex: event.chapterIndex,
-          chapterId: event.chapterId,
-          index: ttsIndexRef.current,
-          retry: ttsRetryCountRef.current,
-          fallbackVoice: ttsFallbackVoiceRef.current,
         });
+      queueExpansionRef.current = expansion;
+    },
+    [appendPreparedChapters, prepareTTSChapterQueue],
+  );
 
-        if (!playback || playback.sessionId !== currentSession) {
-          return;
-        }
+  const syncVisibleTtsChapter = useCallback(
+    (targetChapter: ChapterInfo) => {
+      if (
+        targetChapter.id === activeChapterIdRef.current ||
+        targetChapter.id === nativeNavigationTargetRef.current
+      ) {
+        return;
+      }
+      if (AppState.currentState !== 'active') {
+        pendingVisibleTtsChapterRef.current = targetChapter;
+        return;
+      }
 
-        if (ttsRetryTimerRef.current) {
-          clearTimeout(ttsRetryTimerRef.current);
-          ttsRetryTimerRef.current = null;
-        }
+      pendingVisibleTtsChapterRef.current = null;
+      nativeNavigationTargetRef.current = targetChapter.id;
+      void getChapter(targetChapter);
+    },
+    [getChapter],
+  );
 
-        const restartPlayback = (useSystemVoice: boolean) => {
-          if (playback.sessionId !== speechSessionRef.current) {
-            return;
-          }
+  useEffect(() => {
+    ttsStateRef.current = ttsState;
+    isTTSReadingRef.current = ttsState === 'playing';
+    webViewRef.current?.injectJavaScript(`
+      window.tts?.setPlaybackState?.(${JSON.stringify(ttsState)});
+      true;
+    `);
 
-          const activeChapter = playback.chapters[playback.chapterIndex];
-          const maxIndex = Math.max(
-            (activeChapter?.segments.length ?? 1) - 1,
-            0,
-          );
-          const restartIndex = Math.min(
-            Math.max(ttsIndexRef.current, 0),
-            maxIndex,
-          );
-
-          nativePlaybackStartedRef.current = true;
-          nativePlaybackPausedRef.current = false;
-          isSpeakingRef.current = true;
-
-          NativeTTSMediaControl.startChapterQueue(
-            JSON.stringify(playback.chapters),
-            playback.chapterIndex,
-            restartIndex,
-            useSystemVoice ? '' : playback.voiceIdentifier,
-            playback.language,
-            playback.rate,
-            playback.pitch,
-          );
-        };
-
-        const pauseAtCurrentPosition = () => {
-          NativeTTSMediaControl.stopNativePlayback();
-
-          nativePlaybackStartedRef.current = false;
-          nativePlaybackPausedRef.current = true;
-          isSpeakingRef.current = false;
-          isTTSReadingRef.current = false;
-
-          setTTSIsPlaying(false);
-          updateTTSPlaybackState(false);
-
-          updateTTSNotification({
-            novelName: novel?.name || 'Unknown',
-            chapterName: chapter.name,
-            coverUri: novel?.cover || '',
-            isPlaying: false,
-          });
-
-          webViewRef.current?.injectJavaScript(`
-            if (window.tts && tts.reading) {
-              tts.pause();
-            }
-            true;
-          `);
-        };
-
-        const fallbackToSystemVoice = () => {
-          ttsFallbackVoiceRef.current = true;
-          ttsRetryCountRef.current = 0;
-
-          NativeTTSMediaControl.stopNativePlayback();
-
-          nativePlaybackStartedRef.current = false;
-          isSpeakingRef.current = false;
-
-          console.warn(
-            '[TTS] Reintentando con la voz predeterminada del sistema',
-          );
-
-          ttsRetryTimerRef.current = setTimeout(() => {
-            ttsRetryTimerRef.current = null;
-            restartPlayback(true);
-          }, TTS_RETRY_DELAY_MS);
-        };
-
-        if (errorKind === 'invalid_request') {
-          pauseAtCurrentPosition();
-          return;
-        }
-
-        if (errorKind === 'voice_not_installed') {
-          if (!ttsFallbackVoiceRef.current && playback.voiceIdentifier) {
-            fallbackToSystemVoice();
-          } else {
-            pauseAtCurrentPosition();
-          }
-
-          return;
-        }
-
+    if (ttsState === 'completed') {
+      const generation = ttsSessionGenerationRef.current;
+      const finishChapterQueue = () => {
         if (
-          isNetworkError &&
-          event.requiresNetwork === true &&
-          !ttsFallbackVoiceRef.current &&
-          playback.voiceIdentifier
+          generation === ttsSessionGenerationRef.current &&
+          ttsStateRef.current === 'completed' &&
+          queueExpansionRef.current === null
         ) {
-          fallbackToSystemVoice();
-          return;
+          webViewRef.current?.injectJavaScript(
+            'window.tts?.complete?.(); true;',
+          );
         }
+      };
+      const pendingExpansion = queueExpansionRef.current;
+      if (pendingExpansion) {
+        void pendingExpansion.finally(finishChapterQueue);
+      } else {
+        const timer = setTimeout(finishChapterQueue, 150);
+        return () => clearTimeout(timer);
+      }
+    }
 
-        if (ttsRetryCountRef.current < TTS_MAX_RETRIES) {
-          ttsRetryCountRef.current += 1;
+    if (ttsState === 'idle' && queuedChapterIdsRef.current.length > 0) {
+      ttsSessionGenerationRef.current += 1;
+      queuedChapterIdsRef.current = [];
+      queuedChaptersRef.current.clear();
+      queuedParagraphsRef.current = [];
+      expandedAnchorIdsRef.current.clear();
+      queueExpansionRef.current = null;
+      expandingAnchorIdRef.current = null;
+    }
+    return undefined;
+  }, [isTTSReadingRef, ttsState, webViewRef]);
 
-          NativeTTSMediaControl.stopNativePlayback();
+  useEffect(() => {
+    if (ttsProgress.total <= 0) {
+      return;
+    }
 
-          nativePlaybackStartedRef.current = false;
-          isSpeakingRef.current = false;
+    const decoded = decodeTtsParagraphId(ttsProgress.paragraphId);
+    if (!decoded || decoded.chapterId === activeChapterIdRef.current) {
+      const localParagraphIndex = decoded?.paragraphIndex ?? ttsProgress.index;
+      webViewRef.current?.injectJavaScript(
+        buildTtsWebViewSyncScript(localParagraphIndex, ttsStateRef.current),
+      );
+    }
 
-          ttsRetryTimerRef.current = setTimeout(() => {
-            ttsRetryTimerRef.current = null;
-            restartPlayback(ttsFallbackVoiceRef.current);
-          }, TTS_RETRY_DELAY_MS);
+    if (!decoded) {
+      return;
+    }
 
-          return;
-        }
+    const activeTtsChapter = queuedChaptersRef.current.get(decoded.chapterId);
+    if (activeTtsChapter) {
+      syncVisibleTtsChapter(activeTtsChapter);
+    }
 
-        if (errorKind === 'service' || errorKind === 'output') {
-          pauseAtCurrentPosition();
-          return;
-        }
-
-        if (!ttsFallbackVoiceRef.current && playback.voiceIdentifier) {
-          fallbackToSystemVoice();
-          return;
-        }
-
-        pauseAtCurrentPosition();
-      },
+    const nativeChapterIndex = queuedChapterIdsRef.current.indexOf(
+      decoded.chapterId,
     );
-
-    return () => {
-      playListener.remove();
-      pauseListener.remove();
-      stopListener.remove();
-      rewindListener.remove();
-      prevListener.remove();
-      nextListener.remove();
-      chapterBoundaryListener.remove();
-      chapterChangedListener.remove();
-      seekToListener.remove();
-      segmentListener.remove();
-      queueFinishedListener.remove();
-      nativeErrorListener.remove();
-      clearNextNativeQueuePreparation();
-    };
+    if (nativeChapterIndex < 0) {
+      return;
+    }
+    const remainingChapters =
+      queuedChapterIdsRef.current.length - nativeChapterIndex - 1;
+    if (remainingChapters <= TTS_CHAPTER_PREFETCH_THRESHOLD) {
+      const anchorChapterId = queuedChapterIdsRef.current.at(-1);
+      if (anchorChapterId !== undefined) {
+        requestTtsQueueExpansion(anchorChapterId, false);
+      }
+    }
   }, [
-    chapter.id,
-    chapter.name,
-    clearTTSQueue,
-    nextChapter,
-    novel?.cover,
-    novel?.name,
-    requestChapterNavigation,
-    setTTSCurrentChapterIndex,
-    setTTSIsPlaying,
-    syncVisibleChapterToNativeQueue,
-    updateCurrentItemCurrentIndex,
+    requestTtsQueueExpansion,
+    syncVisibleTtsChapter,
+    ttsProgress,
     webViewRef,
   ]);
 
   useEffect(() => {
-    if (isTTSReadingRef.current) {
-      updateTTSNotification({
-        novelName: novel?.name || 'Unknown',
-        chapterName: chapter.name,
-        coverUri: novel?.cover || '',
-        isPlaying: isTTSReadingRef.current,
-      });
-    }
-  }, [novel?.name, novel?.cover, chapter.name]);
+    const subscription = AppState.addEventListener('change', nextState => {
+      if (nextState === 'active' && pendingVisibleTtsChapterRef.current) {
+        syncVisibleTtsChapter(pendingVisibleTtsChapterRef.current);
+      }
+    });
+    return () => subscription.remove();
+  }, [syncVisibleTtsChapter]);
 
   useEffect(() => {
-    return () => {
-      if (!isTTSReadingRef.current) {
-        updateTTSPlaybackState(false);
-      }
+    if (activeChapterIdRef.current === chapter.id) {
+      return;
+    }
 
-      if (ttsRetryTimerRef.current) {
-        clearTimeout(ttsRetryTimerRef.current);
-        ttsRetryTimerRef.current = null;
-      }
+    if (nativeNavigationTargetRef.current === chapter.id) {
+      nativeNavigationTargetRef.current = null;
+      activeChapterIdRef.current = chapter.id;
+      return;
+    }
 
-      NativeTTSMediaControl.stopNativePlayback();
-      isSpeakingRef.current = false;
-      lastTTSPlaybackRef.current = null;
-    };
-  }, []);
+    activeChapterIdRef.current = chapter.id;
+    ttsSessionGenerationRef.current += 1;
+    expandedAnchorIdsRef.current.clear();
+    runTtsCommand('stop');
+  }, [chapter.id, runTtsCommand]);
+
+  useEffect(() => {
+    const script = buildAdjacentChapterScript(nextChapter, prevChapter);
+    // Kept for onLoadEnd: an update that lands before the document is ready is
+    // dropped by the WebView, so it is replayed once the page has loaded.
+    adjacentChapterScriptRef.current = script;
+    webViewRef.current?.injectJavaScript(script);
+  }, [nextChapter, prevChapter, webViewRef]);
 
   useEffect(() => {
     const mmkvListener = MMKVStorage.addOnValueChangedListener(key => {
       switch (key) {
-        case CHAPTER_READER_SETTINGS:
-          const newSettings =
+        case CHAPTER_READER_SETTINGS: {
+          // Update reader settings
+          const newReaderSettings =
             getMMKVObject<ChapterReaderSettings>(CHAPTER_READER_SETTINGS) ||
             initialChapterReaderSettings;
-          setReaderSettings(newSettings);
-
-          NativeTTSMediaControl.stopNativePlayback();
-          isSpeakingRef.current = false;
-          nativePlaybackStartedRef.current = false;
-          nativePlaybackPausedRef.current = false;
-          ttsRetryCountRef.current = 0;
-          ttsFallbackVoiceRef.current = false;
-
-          if (ttsRetryTimerRef.current) {
-            clearTimeout(ttsRetryTimerRef.current);
-            ttsRetryTimerRef.current = null;
+          setReaderSettings(newReaderSettings);
+          if (
+            !areTTSSettingsEqual(
+              readerSettingsRef.current.tts,
+              newReaderSettings.tts,
+            )
+          ) {
+            updateTtsSettings(toNativeTtsSettings(newReaderSettings.tts));
           }
-
+          // Update WebView settings
           webViewRef.current?.injectJavaScript(
             `
-            reader.readerSettings.val = ${MMKVStorage.getString(
-              CHAPTER_READER_SETTINGS,
-            )};
-            if (window.tts && tts.reading) {
-              const currentElement = tts.currentElement;
-              const wasReading = tts.reading;
-              tts.stop();
-              if (wasReading) {
-                setTimeout(() => {
-                  tts.start(currentElement);
-                }, 100);
-              }
-            }
+            reader.readerSettings.val = ${JSON.stringify(newReaderSettings)}
             `,
           );
           break;
-        case CHAPTER_GENERAL_SETTINGS:
+        }
+        case CHAPTER_GENERAL_SETTINGS: {
+          const newGeneralSettings =
+            getMMKVObject<ChapterGeneralSettings>(CHAPTER_GENERAL_SETTINGS) ||
+            initialChapterGeneralSettings;
           webViewRef.current?.injectJavaScript(
-            `reader.generalSettings.val = ${MMKVStorage.getString(
-              CHAPTER_GENERAL_SETTINGS,
+            `reader.generalSettings.val = ${JSON.stringify(
+              newGeneralSettings,
             )}`,
           );
           break;
+        }
       }
     });
 
     const subscription = deviceInfoEmitter.addListener(
       'RNDeviceInfo_batteryLevelDidChange',
       (level: number) => {
+        lastKnownBatteryLevel = level;
         webViewRef.current?.injectJavaScript(
           `reader.batteryLevel.val = ${level}`,
         );
       },
     );
+
+    getBatteryLevel().then(level => {
+      lastKnownBatteryLevel = level;
+      webViewRef.current?.injectJavaScript(
+        `if (window.reader?.batteryLevel) {
+          window.reader.batteryLevel.val = ${level};
+        }`,
+      );
+    });
+
     return () => {
       subscription.remove();
       mmkvListener.remove();
     };
-  }, [webViewRef]);
-
-  useEffect(() => {
-    const subscription = AppState.addEventListener('change', nextState => {
-      appStateRef.current = nextState;
-
-      if (nextState !== 'active') {
-        return;
-      }
-
-      if (pendingNativeChapterIndexRef.current !== null) {
-        setTimeout(syncVisibleChapterToNativeQueue, 100);
-        return;
-      }
-
-      const pendingNavigation = pendingNavigationRef.current;
-      if (pendingNavigation) {
-        setTimeout(() => {
-          if (
-            appStateRef.current === 'active' &&
-            pendingNavigationRef.current === pendingNavigation
-          ) {
-            pendingNavigationRef.current = null;
-            navigateChapter(pendingNavigation);
-          }
-        }, 500);
-        return;
-      }
-
-      if (autoStartTTSRef.current) {
-        isAutoStartingRef.current = false;
-        tryAutoStartTTS();
-        return;
-      }
-
-      if (isTTSReadingRef.current && ttsChapterIdRef.current === chapter.id) {
-        const index = ttsIndexRef.current;
-        webViewRef.current?.injectJavaScript(`
-          if (window.tts && window.tts.allReadableElements) {
-            const idx = ${index};
-            if (idx < tts.allReadableElements.length) {
-              if (tts.currentElement) {
-                tts.currentElement.classList.remove('highlight');
-              }
-              tts.elementsRead = idx;
-              tts.currentElement = tts.allReadableElements[idx];
-              tts.prevElement = null;
-              tts.started = true;
-              if (tts.currentElement) {
-                tts.scrollToElement(tts.currentElement);
-                tts.currentElement.classList.add('highlight');
-              }
-            }
-          }
-          true;
-        `);
-      }
-    });
-
-    return () => subscription.remove();
-  }, [
-    chapter.id,
-    navigateChapter,
-    syncVisibleChapterToNativeQueue,
-    tryAutoStartTTS,
-    webViewRef,
-  ]);
-
-  // Función para limpiar texto antes de enviarlo al TTS
-  const cleanTextForTTS = (text: string): string => {
-    if (!text) return '';
-    let cleaned = text;
-
-    // 1. Limpieza de Kaomojis y Emociones
-    const kaomojiEmotions: { [key: string]: string } = {
-      '(◕ᴗ◕)': 'feliz',
-      '(◕‿◕)': 'feliz',
-      '(◠‿◠)': 'feliz',
-      '(✿◠‿◠)': 'feliz',
-      '(◕‿◕✿)': 'feliz',
-      '(≧◡≦)': 'feliz',
-      '(^◡^)': 'feliz',
-      '(｡◕‿◕｡)': 'feliz',
-      '(´・ω・`)': 'triste',
-      '(╥﹏╥)': 'llorando',
-      '(;´༎ຶ༎ຶ`)': 'llorando',
-      '(T_T)': 'llorando',
-      '(ToT)': 'llorando',
-      '(；ω；)': 'llorando',
-      '(ノ_<。)': 'llorando',
-      '(╯°□°)╯︵ ┻━┻': 'enojado volcando mesa',
-      '(╬ಠ益ಠ)': 'muy enojado',
-      '(ಠ_ಠ)': 'desaprobación',
-      '(¬_¬)': 'desaprobación',
-      '(ー_ー)': 'molesto',
-      '(￣へ￣)': 'enojado',
-      '(｀Д´)': 'enojado',
-      '(⊙_⊙)': 'sorprendido',
-      '(°ロ°)': 'sorprendido',
-      '(O_O)': 'sorprendido',
-      '(O_O;)': 'sorprendido',
-      '(⊙_⊙;)': 'sorprendido',
-      '(°□°)': 'sorprendido',
-      '(*/ω＼*)': 'avergonzado',
-      '(*/▽＼*)': 'avergonzado',
-      '(⁄ ⁄•⁄ω⁄•⁄ ⁄)': 'avergonzado',
-      '(〃▽〃)': 'avergonzado',
-      '(♥ω♥)': 'enamorado',
-      '(♡ω♡)': 'enamorado',
-      '(´,,•ω•,,)♡': 'cariñoso',
-      '(∗•ω•∗)': 'cariñoso',
-      '(・_・?)': 'confundido',
-      '(?_?)': 'confundido',
-      '¯\\_(ツ)_/¯': 'indiferente',
-      '(ᕙᕗ)': 'fuerte',
-      '(ง •̀_•́)ง': 'determinado',
-      '(ʕ•ᴥ•ʔ)': 'oso cute',
-      '(=^･ω･^=)': 'gatito',
-      '(￣o￣) zzZ': 'dormido',
-      '(～o～) zzZ': 'dormido',
-    };
-
-    Object.entries(kaomojiEmotions).forEach(([kaomoji, emotion]) => {
-      const escaped = kaomoji.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const regex = new RegExp(escaped, 'g');
-      cleaned = cleaned.replace(regex, ` ${emotion} `);
-    });
-
-    // Limpieza genérica de kaomojis restantes
-    cleaned = cleaned
-      .replace(/\([^()]*[◕◠◡‿][^()]*\)/g, ' feliz ')
-      .replace(/\([^()]*[╥༎ຶ;][^()]*\)/g, ' llorando ')
-      .replace(/\([^()]*[╯╰][^()]*\)/g, ' frustrado ')
-      .replace(/┻━┻/g, ' volcando mesa ')
-      .replace(/\([^()]*[ಠ益][^()]*\)/g, ' enojado ')
-      .replace(/\([^()]*[ω・][^()]*\)/g, ' triste ')
-      .replace(/\([^()]*[☆★✦✧][^()]*\)/g, ' brillante ')
-      .replace(/\([^()]*[♥♡❤][^()]*\)/g, ' con amor ');
-
-    // 2. Decodificación de Entidades HTML
-    cleaned = cleaned
-      .replace(/&nbsp;/gi, ' ')
-      .replace(/&amp;/gi, '&')
-      .replace(/&lt;/gi, '<')
-      .replace(/&gt;/gi, '>')
-      .replace(/&quot;/gi, '"')
-      .replace(/&#39;/gi, "'")
-      .replace(/&apos;/gi, "'")
-      .replace(/&mdash;/gi, ' - ')
-      .replace(/&ndash;/gi, ' - ')
-      .replace(/&hellip;/gi, '...')
-      .replace(/&laquo;/gi, '"')
-      .replace(/&raquo;/gi, '"')
-      .replace(/&ldquo;/gi, '"')
-      .replace(/&rdquo;/gi, '"')
-      .replace(/&lsquo;/gi, "'")
-      .replace(/&rsquo;/gi, "'");
-
-    // 3. Eliminación de códigos numéricos y hexadecimales
-    cleaned = cleaned.replace(/&#\d+;/gi, ' ');
-    cleaned = cleaned.replace(/&#x[0-9a-f]+;/gi, ' ');
-
-    // 4. Eliminación de símbolos decorativos y emojis
-    cleaned = cleaned
-      .replace(/[★☆✦✧✩✪✫✬✭✮✯✰]+/g, '')
-      .replace(
-        /[─━│┃┄┅┆┇┈┉┊┋┌┍┎┏┐┑┒┓└┕┖┗┘┙┚┛├┝┞┟┠┡┢┣┤┥┦┧┨┩┪┫┬┭┮┯┰┱┲┳┴┵┶┷┸┹┺┻┼┽┾┿╀╁╂╃╄╅╆╇╈╉╊╋]+/g,
-        '',
-      )
-      .replace(/[◆◇◈◉◊○◌◍◎●◐◑◒◓◔◕◖◗◘◙◚◛]+/g, '')
-      .replace(/[♠♣♥♦♩♪♫♬♭♮♯]+/g, '')
-      .replace(/[→←↑↓↔↕↖↗↘↙]+/g, '')
-      .replace(/[✔✓✗✘✚✛✜✝✞✟✠✡✢✣✤✥✦]+/g, '')
-      .replace(/[\u{1F600}-\u{1F64F}]/gu, '')
-      .replace(/[\u{1F300}-\u{1F5FF}]/gu, '')
-      .replace(/[\u{1F680}-\u{1F6FF}]/gu, '')
-      .replace(/[\u{1F1E0}-\u{1F1FF}]/gu, '');
-
-    // 5. Limpieza de caracteres de control invisibles
-    // Remove control characters by character code to avoid control-regex warnings
-    const filtered = Array.from(cleaned)
-      .filter(ch => {
-        const code = ch.charCodeAt(0);
-        if (code >= 0 && code <= 31) return false;
-        if (code >= 127 && code <= 159) return false;
-        if (
-          code === 0x200b ||
-          code === 0x200c ||
-          code === 0x200d ||
-          code === 0xfeff
-        ) {
-          return false;
-        }
-        return true;
-      })
-      .join('');
-    cleaned = filtered.replace(/\u2028|\u2029/g, ' ');
-
-    // 6. Reemplazo de abreviaturas comunes
-    const customReplacements: { [key: string]: string } = {
-      'TL': 'Traducción',
-      'JP': 'Japonés',
-      'CN': 'Chino',
-      'KR': 'Coreano',
-      'T/N': 'Nota del traductor',
-      'N/T': 'Nota del traductor',
-      'A/N': 'Nota del autor',
-      'N/A': 'Nota del autor',
-      'ED': 'Edición',
-      'PR': 'Prólogo',
-      'EP': 'Epílogo',
-    };
-
-    Object.entries(customReplacements).forEach(([key, value]) => {
-      const regex = new RegExp(`\\b${key}\\b`, 'gi');
-      cleaned = cleaned.replace(regex, value);
-    });
-
-    // 7. Normalización final de espacios y puntuación
-    cleaned = cleaned
-      .replace(/\s+/g, ' ')
-      .replace(/\s+([.,!?;:])/g, '$1')
-      .replace(/([.,!?;:])\s*([.,!?;:])/g, '$1')
-      .replace(/^\s+|\s+$/g, '')
-      .trim();
-
-    if (cleaned.length < 2) return '';
-    return cleaned;
-  };
-
-  const splitLongTTSText = (text: string): string[] => {
-    if (text.length <= TTS_MAX_SEGMENT_LENGTH) {
-      return text ? [text] : [];
-    }
-
-    const chunks: string[] = [];
-    let remaining = text;
-
-    while (remaining.length > TTS_MAX_SEGMENT_LENGTH) {
-      const window = remaining.slice(0, TTS_MAX_SEGMENT_LENGTH);
-      const punctuationBoundary = Math.max(
-        window.lastIndexOf('. '),
-        window.lastIndexOf('! '),
-        window.lastIndexOf('? '),
-        window.lastIndexOf('; '),
-        window.lastIndexOf(': '),
-      );
-      const whitespaceBoundary = window.lastIndexOf(' ');
-      const minimumUsefulBoundary = Math.floor(TTS_MAX_SEGMENT_LENGTH * 0.55);
-
-      let splitAt = TTS_MAX_SEGMENT_LENGTH;
-
-      if (punctuationBoundary >= minimumUsefulBoundary) {
-        splitAt = punctuationBoundary + 1;
-      } else if (whitespaceBoundary >= minimumUsefulBoundary) {
-        splitAt = whitespaceBoundary;
-      }
-
-      const chunk = remaining.slice(0, splitAt).trim();
-
-      if (chunk) {
-        chunks.push(chunk);
-      }
-
-      remaining = remaining.slice(splitAt).trim();
-    }
-
-    if (remaining) {
-      chunks.push(remaining);
-    }
-
-    return chunks;
-  };
-
-  const extractTTSChapterSegments = (chapterHtml: string): string[] => {
-    if (!chapterHtml.trim()) {
-      return [];
-    }
-
-    const $ = load(
-      `<div id="lnreader-tts-root">${chapterHtml}</div>`,
-      null,
-      false,
-    );
-    const root = $('#lnreader-tts-root');
-    const readableNodeNames = new Set([
-      '#TEXT',
-      'B',
-      'I',
-      'SPAN',
-      'EM',
-      'BR',
-      'STRONG',
-      'A',
-    ]);
-    const segments: string[] = [];
-
-    root.find('*').each((_index, element) => {
-      const nodeName = String($(element).prop('tagName') || '').toUpperCase();
-
-      if (!nodeName) {
-        return;
-      }
-
-      if (nodeName !== 'SPAN' && readableNodeNames.has(nodeName)) {
-        return;
-      }
-
-      const children = $(element).contents().toArray();
-
-      if (children.length === 0) {
-        return;
-      }
-
-      const isReadable = children.every(child => {
-        if (child.type === 'text') {
-          return true;
-        }
-
-        const childNodeName = String(
-          $(child).prop('tagName') || '',
-        ).toUpperCase();
-
-        return readableNodeNames.has(childNodeName);
-      });
-
-      if (!isReadable) {
-        return;
-      }
-
-      const cleanedText = cleanTextForTTS($(element).text());
-
-      splitLongTTSText(cleanedText).forEach(segment => {
-        if (segment.length >= 2) {
-          segments.push(segment);
-        }
-      });
-    });
-
-    if (segments.length > 0) {
-      return segments;
-    }
-
-    return splitLongTTSText(cleanTextForTTS(root.text()));
-  };
-
-  const prepareBufferedTTSQueue = async (
-    currentSegments: string[],
-    initialIndex: number,
-    anchorChapterId?: number,
-    useVisibleChapterSegments = true,
-  ) => {
-    const preparedChapters = await prepareTTSChapterQueue(
-      TTS_CHAPTER_BUFFER_SIZE,
-      anchorChapterId,
-    );
-
-    return preparedChapters
-      .map(preparedChapter => {
-        const useWebViewSegments =
-          useVisibleChapterSegments &&
-          preparedChapter.chapter.id === chapter.id &&
-          currentSegments.length > 0;
-        const textSegments = useWebViewSegments
-          ? currentSegments
-          : extractTTSChapterSegments(preparedChapter.chapterText);
-
-        return {
-          chapterId: preparedChapter.chapter.id,
-          chapterName: preparedChapter.chapter.name,
-          novelId: preparedChapter.chapter.novelId,
-          textSegments,
-          currentIndex: useWebViewSegments ? initialIndex : 0,
-        };
-      })
-      .filter(item => item.textSegments.length > 0);
-  };
-
-  const createNativeTTSChapters = (
-    bufferedQueue: BufferedTTSQueueItem[],
-  ): NativeTTSChapter[] =>
-    bufferedQueue
-      .map(queueItem => ({
-        chapterId: queueItem.chapterId,
-        chapterName: queueItem.chapterName,
-        novelName: novel?.name || 'Unknown',
-        coverUri: novel?.cover || '',
-        segments: queueItem.textSegments
-          .map(segment =>
-            cleanTextForTTS(segment)
-              .replace(/\\/g, '')
-              .replace(/""/g, '"')
-              .replace(/\\'/g, "'")
-              .replace(/\\"/g, '"')
-              .replace(/[`]/g, '')
-              .replace(/\s+/g, ' ')
-              .trim(),
-          )
-          .filter(segment => segment.length >= 2),
-      }))
-      .filter(queueItem => queueItem.segments.length > 0);
-
-  const clearNextNativeQueuePreparation = () => {
-    nextNativeQueuePreparationRef.current = null;
-  };
-
-  const prepareNextNativeQueueAhead = async (anchorChapterId: number) => {
-    const currentPrefetch = nextNativeQueuePreparationRef.current;
-
-    if (
-      currentPrefetch?.anchorChapterId === anchorChapterId &&
-      currentPrefetch.promise
-    ) {
-      return currentPrefetch.promise;
-    }
-
-    const promise = prepareBufferedTTSQueue(
-      [],
-      0,
-      anchorChapterId,
-      false,
-    ).catch(error => {
-      console.warn('[TTS] No se pudo adelantar el siguiente buffer:', error);
-      return [];
-    });
-
-    nextNativeQueuePreparationRef.current = {
-      anchorChapterId,
-      promise,
-    };
-
-    return promise;
-  };
-
-  const maybePrefetchNextNativeQueue = (
-    queue: BufferedTTSQueueItem[],
-    nativeChapterIndex: number,
-  ) => {
-    if (queue.length === 0) {
-      return;
-    }
-
-    const remainingChapters = queue.length - nativeChapterIndex - 1;
-
-    if (remainingChapters > TTS_CHAPTER_PREFETCH_THRESHOLD) {
-      return;
-    }
-
-    const anchorChapterId = queue[queue.length - 1]?.chapterId;
-
-    if (typeof anchorChapterId !== 'number') {
-      return;
-    }
-
-    void prepareNextNativeQueueAhead(anchorChapterId);
-  };
-
-  const pauseAtNativeChapterBoundary = () => {
-    // Conservamos vivo el foreground service. Así el usuario puede pulsar Play
-    // y Android volverá a emitir el borde para reintentar la recarga.
-    nativePlaybackStartedRef.current = true;
-    nativePlaybackPausedRef.current = true;
-    isSpeakingRef.current = false;
-    isTTSReadingRef.current = false;
-    setTTSIsPlaying(false);
-    updateTTSPlaybackState(false);
-
-    webViewRef.current?.injectJavaScript(`
-      if (window.tts && tts.reading) { tts.pause(); }
-      true;
-    `);
-  };
-
-  const refillNativeQueueAtBoundary = async (
-    event: NativeTTSChapterBoundaryEvent,
-  ) => {
-    const refillSessionId = speechSessionRef.current;
-    const boundaryChapterId =
-      typeof event.chapterId === 'number'
-        ? event.chapterId
-        : ttsChapterIdRef.current;
-    const direction = event.message === 'previous' ? 'previous' : 'next';
-
-    if (boundaryChapterId === null) {
-      pauseAtNativeChapterBoundary();
-      return;
-    }
-
-    try {
-      const prefetchedQueue = nextNativeQueuePreparationRef.current;
-      let bufferedQueue: BufferedTTSQueueItem[] | null = null;
-
-      if (
-        prefetchedQueue?.anchorChapterId === boundaryChapterId &&
-        prefetchedQueue.promise
-      ) {
-        bufferedQueue = await prefetchedQueue.promise;
-      }
-
-      if (!bufferedQueue || bufferedQueue.length === 0) {
-        // Si el prefetch adelantado no estaba listo o no correspondía al borde
-        // actual, reconstruimos el buffer justo a tiempo con la ruta segura.
-        bufferedQueue = await prepareBufferedTTSQueue(
-          [],
-          0,
-          boundaryChapterId,
-          false,
-        );
-      }
-
-      if (refillSessionId !== speechSessionRef.current) {
-        return;
-      }
-
-      const nextAnchorChapterId =
-        bufferedQueue[bufferedQueue.length - 1]?.chapterId;
-      if (typeof nextAnchorChapterId === 'number') {
-        void prepareNextNativeQueueAhead(nextAnchorChapterId);
-      }
-
-      // Para un capítulo que Android está leyendo en segundo plano no usamos
-      // segmentos del DOM visible: reconstruimos todo desde cache/plugin.
-      const boundaryIndex = bufferedQueue.findIndex(
-        item => item.chapterId === boundaryChapterId,
-      );
-      const targetBufferedIndex =
-        direction === 'previous' ? boundaryIndex - 1 : boundaryIndex + 1;
-      const targetBufferedItem = bufferedQueue[targetBufferedIndex];
-
-      if (boundaryIndex < 0 || !targetBufferedItem) {
-        pauseAtNativeChapterBoundary();
-        return;
-      }
-
-      const nativeChapters = createNativeTTSChapters(bufferedQueue);
-      const nativeChapterIndex = nativeChapters.findIndex(
-        item => item.chapterId === targetBufferedItem.chapterId,
-      );
-
-      if (nativeChapterIndex < 0) {
-        pauseAtNativeChapterBoundary();
-        return;
-      }
-
-      // Mantener los índices de Zustand alineados con la cola que Android
-      // realmente recibió, incluso si un capítulo quedó sin texto utilizable.
-      const nativeChapterIds = new Set(
-        nativeChapters.map(item => item.chapterId),
-      );
-      const synchronizedQueue = bufferedQueue.filter(item =>
-        nativeChapterIds.has(item.chapterId),
-      );
-      const synchronizedIndex = synchronizedQueue.findIndex(
-        item => item.chapterId === targetBufferedItem.chapterId,
-      );
-      const targetQueueItem = synchronizedQueue[synchronizedIndex];
-
-      if (synchronizedIndex < 0 || !targetQueueItem) {
-        pauseAtNativeChapterBoundary();
-        return;
-      }
-
-      const previousPlayback = lastTTSPlaybackRef.current;
-      const selectedVoice = readerSettingsRef.current.tts?.voice;
-      const voiceIdentifier = ttsFallbackVoiceRef.current
-        ? ''
-        : previousPlayback?.voiceIdentifier || selectedVoice?.identifier || '';
-      const language =
-        previousPlayback?.language || selectedVoice?.language || '';
-      const rate =
-        previousPlayback?.rate || readerSettingsRef.current.tts?.rate || 1;
-      const pitch =
-        previousPlayback?.pitch || readerSettingsRef.current.tts?.pitch || 1;
-
-      bufferedTTSQueueRef.current = synchronizedQueue;
-      setTTSQueue(synchronizedQueue, synchronizedIndex);
-      setTTSCurrentChapterIndex(synchronizedIndex);
-      ttsSegmentsRef.current = targetQueueItem.textSegments;
-      ttsChapterIdRef.current = targetQueueItem.chapterId;
-      ttsIndexRef.current = 0;
-      pendingNativeChapterIndexRef.current = synchronizedIndex;
-      nativePlaybackStartedRef.current = true;
-      nativePlaybackPausedRef.current = false;
-      isSpeakingRef.current = true;
-      isTTSReadingRef.current = true;
-      setTTSIsPlaying(true);
-      ttsRetryCountRef.current = 0;
-
-      lastTTSPlaybackRef.current = {
-        chapters: nativeChapters,
-        chapterIndex: nativeChapterIndex,
-        segmentIndex: 0,
-        voiceIdentifier:
-          previousPlayback?.voiceIdentifier || selectedVoice?.identifier || '',
-        language,
-        rate,
-        pitch,
-        sessionId: speechSessionRef.current,
-      };
-
-      NativeTTSMediaControl.startChapterQueue(
-        JSON.stringify(nativeChapters),
-        nativeChapterIndex,
-        0,
-        voiceIdentifier,
-        language,
-        rate,
-        pitch,
-      );
-
-      if (appStateRef.current === 'active') {
-        setTimeout(syncVisibleChapterToNativeQueue, 50);
-      }
-    } catch (error) {
-      console.warn('[TTS] No se pudo renovar el buffer nativo:', error);
-      pauseAtNativeChapterBoundary();
-    }
-  };
-
-  useEffect(() => {
-    nativeBoundaryRefillRef.current = event => {
-      if (nativeBoundaryRefillPromiseRef.current) {
-        return;
-      }
-
-      const refillPromise = refillNativeQueueAtBoundary(event);
-      nativeBoundaryRefillPromiseRef.current = refillPromise;
-
-      refillPromise.finally(() => {
-        if (nativeBoundaryRefillPromiseRef.current === refillPromise) {
-          nativeBoundaryRefillPromiseRef.current = null;
-        }
-      });
-    };
-
-    return () => {
-      nativeBoundaryRefillRef.current = null;
-    };
-  });
-
-  const speakText = async (
-    text: string,
-    index = ttsIndexRef.current,
-    sessionId = speechSessionRef.current,
-  ) => {
-    if (sessionId !== speechSessionRef.current) {
-      return;
-    }
-
-    if (
-      nativePlaybackStartedRef.current &&
-      nativePlaybackPausedRef.current &&
-      index === ttsIndexRef.current
-    ) {
-      nativePlaybackPausedRef.current = false;
-      isSpeakingRef.current = true;
-      NativeTTSMediaControl.resumePlayback();
-      return;
-    }
-
-    const fallbackCurrentQueue: BufferedTTSQueueItem[] = [
-      {
-        chapterId: chapter.id,
-        chapterName: chapter.name,
-        novelId: novel.id,
-        textSegments:
-          ttsSegmentsRef.current.length > 0 ? ttsSegmentsRef.current : [text],
-        currentIndex: index,
-      },
-    ];
-
-    let bufferedQueue = bufferedTTSQueueRef.current;
-
-    if (ttsQueuePreparationRef.current) {
-      try {
-        bufferedQueue = await ttsQueuePreparationRef.current;
-      } catch {
-        bufferedQueue = fallbackCurrentQueue;
-      }
-    }
-
-    if (sessionId !== speechSessionRef.current) {
-      return;
-    }
-
-    if (bufferedQueue.length === 0) {
-      bufferedQueue = fallbackCurrentQueue;
-    }
-
-    const selectedVoice = readerSettingsRef.current.tts?.voice;
-    const voiceIdentifier = ttsFallbackVoiceRef.current
-      ? ''
-      : selectedVoice?.identifier || '';
-    const language = selectedVoice?.language || '';
-    const rate = readerSettingsRef.current.tts?.rate || 1;
-    const pitch = readerSettingsRef.current.tts?.pitch || 1;
-
-    const nativeChapters = createNativeTTSChapters(bufferedQueue);
-
-    if (nativeChapters.length === 0) {
-      return;
-    }
-
-    const nativeChapterIds = new Set(
-      nativeChapters.map(item => item.chapterId),
-    );
-    const synchronizedQueue = bufferedQueue.filter(item =>
-      nativeChapterIds.has(item.chapterId),
-    );
-    const nativeChapterIndex = nativeChapters.findIndex(
-      item => item.chapterId === chapter.id,
-    );
-    const synchronizedChapterIndex = synchronizedQueue.findIndex(
-      item => item.chapterId === chapter.id,
-    );
-
-    if (nativeChapterIndex < 0 || synchronizedChapterIndex < 0) {
-      return;
-    }
-
-    const activeSegments = nativeChapters[nativeChapterIndex]?.segments ?? [];
-    const normalizedSegmentIndex = Math.min(
-      Math.max(index, 0),
-      Math.max(activeSegments.length - 1, 0),
-    );
-
-    bufferedTTSQueueRef.current = synchronizedQueue;
-    setTTSQueue(synchronizedQueue, synchronizedChapterIndex);
-    setTTSCurrentChapterIndex(synchronizedChapterIndex);
-    ttsIndexRef.current = normalizedSegmentIndex;
-    isSpeakingRef.current = true;
-    nativePlaybackStartedRef.current = true;
-    nativePlaybackPausedRef.current = false;
-    ttsRetryCountRef.current = 0;
-
-    lastTTSPlaybackRef.current = {
-      chapters: nativeChapters,
-      chapterIndex: nativeChapterIndex,
-      segmentIndex: normalizedSegmentIndex,
-      voiceIdentifier: selectedVoice?.identifier || '',
-      language,
-      rate,
-      pitch,
-      sessionId,
-    };
-
-    NativeTTSMediaControl.startChapterQueue(
-      JSON.stringify(nativeChapters),
-      nativeChapterIndex,
-      normalizedSegmentIndex,
-      voiceIdentifier,
-      language,
-      rate,
-      pitch,
-    );
-  };
-
+  }, [updateTtsSettings, webViewRef]);
   const isRTL = plugin?.lang === 'Arabic' || plugin?.lang === 'Hebrew';
   const readerDir = isRTL ? 'rtl' : 'ltr';
 
-  const cleanupScript = `
-    (function() {
-      if (window.reader && window.reader.post) {
-        var originalPost = window.reader.post;
-        window.reader.post = function(event) {
-          if (event && event.type === 'speak' && typeof event.data === 'string') {
-            event.data = event.data
-              .replace(/\\\\/g, '').replace(/\\\\"/g, '"').replace(/\\\\'/g, "'")
-              .replace(/\\n/g, ' ').replace(/\\t/g, ' ').replace(/\\r/g, '')
-              .replace(/\\b/g, '').replace(/\\f/g, '').replace(/\\v/g, '')
-              .replace(/\\0/g, '').replace(/\\x[0-9a-fA-F]{2}/g, '')
-              .replace(/\\u[0-9a-fA-F]{4}/g, '').replace(/\\u{[0-9a-fA-F]+}/g, '')
-              .replace(/\\c[a-zA-Z]/g, '').replace(/\\[^0-9xucbfnrtv0]/g, '')
-              .replace(/\\s+/g, ' ').trim();
-          }
-          originalPost.call(this, event);
-        };
-        console.log('[LNReader] TTS Cleanup Hook Injected');
-      }
-    })();
-  `;
-
-  return (
-    <WebView
-      ref={webViewRef}
-      style={{ backgroundColor: readerSettings.theme }}
-      allowFileAccess={true}
-      originWhitelist={['*']}
-      scalesPageToFit={true}
-      showsVerticalScrollIndicator={false}
-      javaScriptEnabled={true}
-      webviewDebuggingEnabled={__DEV__}
-      onLoadEnd={() => {
-        const currentBatteryLevel = getBatteryLevelSync();
-        webViewRef.current?.injectJavaScript(
-          `if (window.reader && window.reader.batteryLevel) {
-            window.reader.batteryLevel.val = ${currentBatteryLevel};
-          }
-          true;`,
-        );
-
-        webViewRef.current?.injectJavaScript(cleanupScript);
-
-        if (autoStartTTSRef.current) {
-          tryAutoStartTTS();
-        } else {
-          isAutoStartingRef.current = false;
-          isTransitioningRef.current = false;
-        }
-      }}
-      onMessage={(ev: { nativeEvent: { data: string } }) => {
-        __DEV__ && onLogMessage(ev);
-        const event: WebViewPostEvent = JSON.parse(ev.nativeEvent.data);
-        switch (event.type) {
-          case 'tts-auto-started': {
-            const data = event.data as { chapterId?: unknown } | undefined;
-
-            if (data?.chapterId === chapter.id) {
-              autoStartTTSRef.current = false;
-              isAutoStartingRef.current = false;
-              isTransitioningRef.current = false;
-              isTTSReadingRef.current = true;
-              setTTSIsPlaying(true);
-              updateTTSPlaybackState(true);
-
-              updateTTSNotification({
-                novelName: novel?.name || 'Unknown',
-                chapterName: chapter.name,
-                coverUri: novel?.cover || '',
-                isPlaying: true,
-              });
-            }
-            break;
-          }
-          case 'tts-auto-start-failed': {
-            const data = event.data as { chapterId?: unknown } | undefined;
-
-            if (data?.chapterId === chapter.id) {
-              autoStartTTSRef.current = false;
-              isAutoStartingRef.current = false;
-              isTransitioningRef.current = false;
-              isTTSReadingRef.current = false;
-              setTTSIsPlaying(false);
-              updateTTSPlaybackState(false);
-              console.warn(
-                '[TTS] No fue posible iniciar automáticamente el capítulo nuevo',
-              );
-            }
-            break;
-          }
-          case 'tts-queue': {
-            const payload = event.data as
-              | { queue?: unknown; startIndex?: unknown }
-              | undefined;
-            const queue = Array.isArray(payload?.queue)
-              ? payload?.queue.filter(
-                  (item): item is string =>
-                    typeof item === 'string' && item.trim().length > 0,
-                )
-              : [];
-            const initialIndex =
-              typeof payload?.startIndex === 'number' ? payload.startIndex : 0;
-
-            ttsSegmentsRef.current = queue;
-            ttsIndexRef.current = initialIndex;
-            ttsChapterIdRef.current = chapter.id;
-            ttsRetryCountRef.current = 0;
-            ttsFallbackVoiceRef.current = false;
-            pendingNativeChapterIndexRef.current = null;
-            lastTTSPlaybackRef.current = null;
-            clearNextNativeQueuePreparation();
-
-            const currentQueueItem = {
-              chapterId: chapter.id,
-              chapterName: chapter.name,
-              novelId: novel.id,
-              textSegments: queue,
-              currentIndex: initialIndex,
-            };
-
-            // Guardamos inmediatamente el capítulo visible como respaldo.
-            // La primera reproducción nativa esperará la preparación del buffer
-            // para que Android reciba varios capítulos desde el inicio.
-            bufferedTTSQueueRef.current = [currentQueueItem];
-            setTTSQueue([currentQueueItem], 0);
-            setTTSCurrentChapterIndex(0);
-
-            const queuePreparation = prepareBufferedTTSQueue(
-              queue,
-              initialIndex,
-            )
-              .then(bufferedQueue => {
-                if (ttsChapterIdRef.current !== chapter.id) {
-                  return [currentQueueItem];
-                }
-
-                const preparedQueue =
-                  bufferedQueue.length > 0 ? bufferedQueue : [currentQueueItem];
-
-                const preparedCurrentIndex = Math.max(
-                  preparedQueue.findIndex(
-                    item => item.chapterId === chapter.id,
-                  ),
-                  0,
-                );
-
-                bufferedTTSQueueRef.current = preparedQueue;
-                setTTSQueue(preparedQueue, preparedCurrentIndex);
-                setTTSCurrentChapterIndex(preparedCurrentIndex);
-
-                return preparedQueue;
-              })
-              .catch(error => {
-                console.warn(
-                  '[TTS] No se pudo preparar la cola de capítulos:',
-                  error,
-                );
-
-                bufferedTTSQueueRef.current = [currentQueueItem];
-                return [currentQueueItem];
-              });
-
-            ttsQueuePreparationRef.current = queuePreparation;
-
-            setTimeout(() => {
-              webViewRef.current?.injectJavaScript(`
-                if(window.tts && window.tts.allReadableElements) {
-                  var idx = ${initialIndex};
-                  if(idx < tts.allReadableElements.length) {
-                    tts.elementsRead = idx;
-                    tts.currentElement = tts.allReadableElements[idx];
-                    if(tts.currentElement) {
-                      tts.currentElement.classList.add('highlight');
-                      tts.scrollToElement(tts.currentElement);
-                    }
-                  }
-                }
-              `);
-            }, 100);
-            break;
-          }
-          case 'hide':
-            onPress();
-            break;
-          case 'next':
-            nextChapterScreenVisible.current = true;
-            if (event.autoStartTTS) {
-              requestChapterNavigation('NEXT');
-            } else {
-              navigateChapter('NEXT');
-            }
-            break;
-          case 'prev':
-            if (event.autoStartTTS) {
-              requestChapterNavigation('PREV');
-            } else {
-              navigateChapter('PREV');
-            }
-            break;
-          case 'save':
-            if (event.data && typeof event.data === 'number') {
-              saveProgress(event.data);
-            }
-            break;
-          case 'speak':
-            if (event.data && typeof event.data === 'string') {
-              if (ttsChapterIdRef.current !== chapter.id) {
-                break;
-              }
-
-              const requestedIndex =
-                typeof event.index === 'number'
-                  ? event.index
-                  : ttsIndexRef.current;
-
-              // El WebView puede emitir el mismo evento dos veces durante una
-              // transición. No reiniciamos el párrafo que ya se está leyendo.
-              if (
-                isSpeakingRef.current &&
-                requestedIndex === ttsIndexRef.current
-              ) {
-                break;
-              }
-
-              if (isSpeakingRef.current) {
-                speechSessionRef.current += 1;
-                isSpeakingRef.current = false;
-              }
-
-              if (ttsRetryTimerRef.current) {
-                clearTimeout(ttsRetryTimerRef.current);
-                ttsRetryTimerRef.current = null;
-              }
-              ttsRetryCountRef.current = 0;
-
-              ttsIndexRef.current = requestedIndex;
-              updateCurrentItemCurrentIndex(requestedIndex);
-
-              if (!isTTSReadingRef.current) {
-                isTTSReadingRef.current = true;
-                setTTSIsPlaying(true);
-                showTTSNotification({
-                  novelName: novel?.name || 'Unknown',
-                  chapterName: chapter.name,
-                  coverUri: novel?.cover || '',
-                  isPlaying: true,
-                });
-              } else {
-                updateTTSNotification({
-                  novelName: novel?.name || 'Unknown',
-                  chapterName: chapter.name,
-                  coverUri: novel?.cover || '',
-                  isPlaying: true,
-                });
-              }
-
-              if (typeof event.total === 'number' && event.total > 0) {
-                updateTTSProgress(requestedIndex, event.total);
-              }
-
-              const sessionId = speechSessionRef.current;
-              speakText(event.data, requestedIndex, sessionId);
-            } else {
-              webViewRef.current?.injectJavaScript('tts.next?.(); true;');
-            }
-            break;
-          case 'pause-speak':
-            NativeTTSMediaControl.pausePlayback();
-            nativePlaybackPausedRef.current = true;
-            isSpeakingRef.current = false;
-            break;
-          case 'stop-speak':
-            speechSessionRef.current += 1;
-            NativeTTSMediaControl.stopNativePlayback();
-            nativePlaybackStartedRef.current = false;
-            nativePlaybackPausedRef.current = false;
-            isSpeakingRef.current = false;
-            ttsRetryCountRef.current = 0;
-            ttsFallbackVoiceRef.current = false;
-            pendingNativeChapterIndexRef.current = null;
-            lastTTSPlaybackRef.current = null;
-
-            if (ttsRetryTimerRef.current) {
-              clearTimeout(ttsRetryTimerRef.current);
-              ttsRetryTimerRef.current = null;
-            }
-
-            if (!autoStartTTSRef.current) {
-              isTTSReadingRef.current = false;
-              setTTSIsPlaying(false);
-              clearTTSQueue();
-              setTTSCurrentChapterIndex(0);
-              updateTTSPlaybackState(false);
-            }
-            break;
-          case 'tts-state':
-            if (event.data && typeof event.data === 'object') {
-              const data = event.data as { isReading?: boolean };
-              const isReading = data.isReading === true;
-              if (isReading || !autoStartTTSRef.current) {
-                isTTSReadingRef.current = isReading;
-                updateTTSPlaybackState(isReading);
-              }
-            }
-            break;
-        }
-      }}
-      source={{
-        baseUrl: !chapter.isDownloaded ? plugin?.site : undefined,
-        headers: plugin?.imageRequestInit?.headers,
-        method: plugin?.imageRequestInit?.method,
-        body: plugin?.imageRequestInit?.body,
-        html: ` 
+  /**
+   * Serialising the whole chapter is expensive, so the document is built once
+   * per chapter. Handing the WebView a different `source` also reloads the
+   * page, so nothing that changes while a chapter is on screen may be part of
+   * it – those updates go through `injectJavaScript` instead.
+   */
+  const source = useMemo(() => {
+    // eslint-disable-next-line react-hooks/refs
+    const isNextChapterScreenVisible = nextChapterScreenVisible.current;
+    return {
+      baseUrl: !chapter.isDownloaded ? plugin?.site : undefined,
+      headers: plugin?.imageRequestInit?.headers,
+      method: plugin?.imageRequestInit?.method,
+      body: plugin?.imageRequestInit?.body,
+      html: `
         <!DOCTYPE html>
           <html dir="${readerDir}">
             <head>
@@ -2162,13 +555,17 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
               <style>
               :root {
                 --StatusBar-currentHeight: ${StatusBar.currentHeight}px;
-                --readerSettings-theme: ${readerSettings.theme};
-                --readerSettings-padding: ${readerSettings.padding}px;
-                --readerSettings-textSize: ${readerSettings.textSize}px;
-                --readerSettings-textColor: ${readerSettings.textColor};
-                --readerSettings-textAlign: ${readerSettings.textAlign};
-                --readerSettings-lineHeight: ${readerSettings.lineHeight};
-                --readerSettings-fontFamily: ${readerSettings.fontFamily};
+                --readerSettings-theme: ${initialReaderSettings.theme};
+                --readerSettings-padding: ${initialReaderSettings.padding}px;
+                --readerSettings-textSize: ${initialReaderSettings.textSize}px;
+                --readerSettings-textColor: ${initialReaderSettings.textColor};
+                --readerSettings-textAlign: ${initialReaderSettings.textAlign};
+                --readerSettings-lineHeight: ${
+                  initialReaderSettings.lineHeight
+                };
+                --readerSettings-fontFamily: ${
+                  initialReaderSettings.fontFamily
+                };
                 --theme-primary: ${theme.primary};
                 --theme-onPrimary: ${theme.onPrimary};
                 --theme-secondary: ${theme.secondary};
@@ -2185,45 +582,46 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
                 --theme-outline: ${theme.outline};
                 --theme-rippleColor: ${theme.rippleColor};
                 }
-                
+                </style>
+                <style id="ln-font">
                 @font-face {
-                  font-family: ${readerSettings.fontFamily};
+                  font-family: ${initialReaderSettings.fontFamily};
                   src: url("file:///android_asset/fonts/${
-                    readerSettings.fontFamily
+                    initialReaderSettings.fontFamily
                   }.ttf");
                 }
-                </style>
- 
+				</style>
               <link rel="stylesheet" href="${pluginCustomCSS}">
-              <style>${readerSettings.customJS}</style>
+              <style id="ln-custom-css">${
+                initialReaderSettings.customCSS
+              }</style>
             </head>
             <body class="${
               chapterGeneralSettings.pageReader ? 'page-reader' : ''
             }">
               <div class="transition-chapter" style="transform: ${
-                nextChapterScreenVisible.current
+                isNextChapterScreenVisible
                   ? 'translateX(-100%)'
                   : 'translateX(0%)'
               };
               ${chapterGeneralSettings.pageReader ? '' : 'display: none'}"
               ">${chapter.name}</div>
               <div id="LNReader-chapter">
-                ${html}  
+                ${html}
               </div>
               <div id="reader-ui"></div>
               </body>
               <script>
                 var initialPageReaderConfig = ${JSON.stringify({
-                  nextChapterScreenVisible: nextChapterScreenVisible.current,
+                  nextChapterScreenVisible: isNextChapterScreenVisible,
                 })};
- 
+
+
                 var initialReaderConfig = ${JSON.stringify({
-                  readerSettings,
+                  readerSettings: initialReaderSettings,
                   chapterGeneralSettings,
                   novel,
                   chapter,
-                  nextChapter,
-                  prevChapter,
                   batteryLevel,
                   autoSaveInterval: 2222,
                   DEBUG: __DEV__,
@@ -2232,9 +630,6 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
                       getString('readerScreen.finished') +
                       ': ' +
                       chapter.name.trim(),
-                    nextChapter: getString('readerScreen.nextChapter', {
-                      name: nextChapter?.name,
-                    }),
                     noNextChapter: getString('readerScreen.noNextChapter'),
                   },
                 })}
@@ -2244,17 +639,238 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
               <script src="${assetsUriPrefix}/js/van.js"></script>
               <script src="${assetsUriPrefix}/js/text-vibe.js"></script>
               <script src="${assetsUriPrefix}/js/core.js"></script>
+              <script src="${assetsUriPrefix}/js/search.js"></script>
               <script src="${assetsUriPrefix}/js/index.js"></script>
               <script src="${pluginCustomJS}"></script>
-              <script>
-                ${readerSettings.customJS}
-              </script>
-              <script>
-                ${cleanupScript}
+              <script id="ln-custom-js">
+                ${initialReaderSettings.customJS}
               </script>
           </html>
           `,
+    };
+  }, [
+    batteryLevel,
+    chapter,
+    chapterGeneralSettings,
+    html,
+    initialReaderSettings,
+    novel,
+    plugin,
+    pluginCustomCSS,
+    pluginCustomJS,
+    readerDir,
+    theme,
+  ]);
+
+  return (
+    <WebView
+      ref={webViewRef}
+      onTouchStart={onTouchStart}
+      style={{ backgroundColor: readerSettings.theme }}
+      allowFileAccess={true}
+      originWhitelist={['*']}
+      scalesPageToFit={true}
+      showsVerticalScrollIndicator={false}
+      javaScriptEnabled={true}
+      webviewDebuggingEnabled={__DEV__}
+      onShouldStartLoadWithRequest={({ url }) => {
+        if (isPluginIssueReportUrl(url)) {
+          void Linking.openURL(url);
+          return false;
+        }
+        return true;
       }}
+      onLoadEnd={() => {
+        webViewRef.current?.injectJavaScript(
+          `if (window.reader && window.reader.batteryLevel) {
+            window.reader.batteryLevel.val = ${lastKnownBatteryLevel};
+          }`,
+        );
+        webViewRef.current?.injectJavaScript(adjacentChapterScriptRef.current);
+
+        const decodedProgress = decodeTtsParagraphId(ttsProgress.paragraphId);
+        if (
+          decodedProgress?.chapterId === chapter.id &&
+          ttsProgress.total > 0
+        ) {
+          webViewRef.current?.injectJavaScript(
+            buildTtsWebViewSyncScript(
+              decodedProgress.paragraphIndex,
+              ttsStateRef.current,
+            ),
+          );
+        }
+
+        const searchText = searchTextRef.current.trim();
+        if (searchText) {
+          webViewRef.current?.injectJavaScript(
+            `window.readerSearch?.search(${JSON.stringify(searchText)}); true;`,
+          );
+        }
+
+        if (autoStartTTSRef.current) {
+          autoStartTTSRef.current = false;
+          setTimeout(() => {
+            webViewRef.current?.injectJavaScript(`
+              (function() {
+                if (window.tts && reader.generalSettings.val.TTSEnable) {
+                  setTimeout(() => {
+                    tts.start();
+                  }, 500);
+                }
+              })();
+            `);
+          }, 300);
+        }
+      }}
+      onMessage={(ev: { nativeEvent: { data: string } }) => {
+        __DEV__ && onLogMessage(ev);
+        const event: WebViewPostEvent = JSON.parse(ev.nativeEvent.data);
+        switch (event.type) {
+          case 'tts-queue': {
+            const payload = event.data as
+              | { queue?: unknown; startIndex?: unknown }
+              | undefined;
+            const queue = Array.isArray(payload?.queue)
+              ? payload.queue.filter(
+                  (item): item is string =>
+                    typeof item === 'string' && item.trim().length > 0,
+                )
+              : [];
+            const startIndex =
+              typeof payload?.startIndex === 'number' ? payload.startIndex : 0;
+            const generation = ttsSessionGenerationRef.current + 1;
+            ttsSessionGenerationRef.current = generation;
+            queuedChapterIdsRef.current = [chapter.id];
+            queuedChaptersRef.current = new Map([[chapter.id, chapter]]);
+            expandedAnchorIdsRef.current.clear();
+            expandingAnchorIdRef.current = null;
+            queueExpansionRef.current = null;
+
+            const currentParagraphs = createTtsParagraphs(
+              chapter.id,
+              chapter.name,
+              queue,
+            );
+            const nativeStartIndex = Math.max(
+              currentParagraphs.findIndex(paragraph => {
+                const decoded = decodeTtsParagraphId(paragraph.id);
+                return decoded?.paragraphIndex === startIndex;
+              }),
+              0,
+            );
+            queuedParagraphsRef.current = currentParagraphs;
+            void loadAndPlay(
+              currentParagraphs,
+              nativeStartIndex,
+              {
+                novelName: novel?.name || 'Unknown',
+                chapterName: chapter.name,
+                coverUri: novel?.cover || undefined,
+              },
+              toNativeTtsSettings(readerSettingsRef.current.tts),
+            );
+            if (
+              currentParagraphs.length > 0 &&
+              readerSettingsRef.current.tts?.autoPageAdvance === true
+            ) {
+              requestTtsQueueExpansion(chapter.id, true);
+            }
+            break;
+          }
+          case 'tts-command': {
+            if (!event.data || typeof event.data !== 'object') {
+              break;
+            }
+            const data = event.data as {
+              command?: unknown;
+              index?: unknown;
+            };
+            switch (data.command) {
+              case 'next':
+              case 'pause':
+              case 'play':
+              case 'previous':
+              case 'replay':
+              case 'stop':
+                if (data.command === 'stop') {
+                  ttsSessionGenerationRef.current += 1;
+                  expandedAnchorIdsRef.current.clear();
+                  queueExpansionRef.current = null;
+                  expandingAnchorIdRef.current = null;
+                }
+                runTtsCommand(data.command);
+                break;
+              case 'seekTo':
+                if (typeof data.index === 'number') {
+                  const globalIndex = queuedParagraphsRef.current.findIndex(
+                    paragraph => {
+                      const decoded = decodeTtsParagraphId(paragraph.id);
+                      return (
+                        decoded?.chapterId === chapter.id &&
+                        decoded.paragraphIndex === data.index
+                      );
+                    },
+                  );
+                  seekTts(globalIndex >= 0 ? globalIndex : data.index);
+                }
+                break;
+            }
+            break;
+          }
+          case 'hide':
+            onPress();
+            break;
+          case 'next':
+            nextChapterScreenVisible.current = true;
+            if (event.autoStartTTS) {
+              autoStartTTSRef.current = true;
+            }
+            navigateChapter('NEXT');
+            break;
+          case 'prev':
+            if (event.autoStartTTS) {
+              autoStartTTSRef.current = true;
+            }
+            navigateChapter('PREV');
+            break;
+          case 'save':
+            if (event.data && typeof event.data === 'number') {
+              saveProgress(event.data);
+            }
+            break;
+          case 'search-result':
+            if (event.data && typeof event.data === 'object') {
+              const data = event.data as {
+                query?: unknown;
+                current?: unknown;
+                total?: unknown;
+                renderedTotal?: unknown;
+                isTruncated?: unknown;
+              };
+              const query = typeof data.query === 'string' ? data.query : '';
+              if (query !== searchTextRef.current.trim()) {
+                break;
+              }
+              const total = typeof data.total === 'number' ? data.total : 0;
+              onSearchResult({
+                query,
+                current: typeof data.current === 'number' ? data.current : 0,
+                total,
+                renderedTotal:
+                  typeof data.renderedTotal === 'number'
+                    ? data.renderedTotal
+                    : total,
+                isTruncated: data.isTruncated === true,
+              });
+            }
+            break;
+          case 'interaction':
+            onUserInteraction();
+            break;
+        }
+      }}
+      source={source}
     />
   );
 };

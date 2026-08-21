@@ -1,14 +1,12 @@
 import * as Linking from 'expo-linking';
 import * as WebBrowser from 'expo-web-browser';
-import { ANILIST_CLIENT_ID } from '../../generated/build-info';
+import { ANILIST_CLIENT_ID } from '@env';
 import { AuthenticationResult, Tracker } from './index';
 
 const apiEndpoint = 'https://graphql.anilist.co';
 const clientId = ANILIST_CLIENT_ID;
 
 const redirectUri = Linking.createURL('tracker/AL');
-
-const authUrl = `https://anilist.co/api/v2/oauth/authorize?client_id=${clientId}&response_type=token`;
 
 const searchQuery = `query($search: String) {
   Page {
@@ -46,6 +44,11 @@ const updateListEntryMutation = `mutation($id: Int!, $status: MediaListStatus, $
 
 export const aniListTracker = {
   authenticate: async () => {
+    if (!clientId) {
+      throw new Error('AniList client ID is not configured');
+    }
+
+    const authUrl = `https://anilist.co/api/v2/oauth/authorize?client_id=${clientId}&response_type=token`;
     const result = await WebBrowser.openAuthSessionAsync(authUrl, redirectUri);
     if (result.type === 'success') {
       const { url } = result;

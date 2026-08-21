@@ -4,14 +4,15 @@ import {
   BottomSheetView,
   useBottomSheetScrollableCreator,
 } from '@gorhom/bottom-sheet';
-import { LegendList, LegendListRenderItemProps } from '@legendapp/list';
+import {
+  LegendList,
+  LegendListRenderItemProps,
+} from '@legendapp/list/react-native';
 import color from 'color';
 
 import BottomSheet from '@components/BottomSheet/BottomSheet';
 import { ThemeColors } from '@theme/types';
 import { BottomSheetModalMethods } from '@gorhom/bottom-sheet/lib/typescript/types';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { overlay } from 'react-native-paper';
 
 interface PageNavigationBottomSheetProps {
   bottomSheetRef: React.RefObject<BottomSheetModalMethods | null>;
@@ -29,8 +30,6 @@ export default function PageNavigationBottomSheet({
   openPage,
 }: PageNavigationBottomSheetProps) {
   const BottomSheetLegendListScrollable = useBottomSheetScrollableCreator();
-  const insets = useSafeAreaInsets();
-  const { left, right } = insets;
 
   const renderItem = ({ item, index }: LegendListRenderItemProps<string>) => {
     const isSelected = index === pageIndex;
@@ -78,19 +77,8 @@ export default function PageNavigationBottomSheet({
     <BottomSheet
       bottomSheetRef={bottomSheetRef}
       snapPoints={[Math.min(400, pages.length * 56 + 100)]}
-      backgroundStyle={styles.transparent}
     >
-      <BottomSheetView
-        style={[
-          styles.contentContainer,
-          {
-            backgroundColor: overlay(2, theme.surface),
-            marginStart: left,
-            marginEnd: right,
-            paddingBottom: insets.bottom,
-          },
-        ]}
-      >
+      <BottomSheetView style={styles.contentContainer}>
         <LegendList
           data={pages}
           recycleItems
@@ -108,8 +96,6 @@ export default function PageNavigationBottomSheet({
 
 const styles = StyleSheet.create({
   contentContainer: {
-    borderTopLeftRadius: 8,
-    borderTopRightRadius: 8,
     flex: 1,
     maxHeight: 400,
   },
@@ -139,8 +125,5 @@ const styles = StyleSheet.create({
     borderRadius: 2,
     height: 20,
     width: 3,
-  },
-  transparent: {
-    backgroundColor: 'transparent',
   },
 });

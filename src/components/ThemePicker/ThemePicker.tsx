@@ -1,4 +1,3 @@
-import React from 'react';
 import {
   View,
   Text,
@@ -140,7 +139,6 @@ const styles = StyleSheet.create({
   },
   horizontalContainer: {
     width: undefined,
-    marginHorizontal: 4,
     paddingBottom: 0,
   },
   card: {
