@@ -322,4 +322,104 @@ describe('useChapter', () => {
     expect(result.current.chapter.id).toBe(nextChapter.id);
     expect(result.current.chapterText).toBe('SANITIZED:next body');
   });
+
+  it('prepares 10 TTS chapters and appends 10 more when only 3 remain', async () => {
+    const store = createStore();
+    mockUseNovelActions.mockReturnValue(store.state);
+
+    const chapters = Array.from({ length: 20 }, (_, index) => {
+      const id = index + 1;
+      const page = id <= 6 ? '1' : '2';
+      return {
+        ...makeChapter(id, page),
+        position: id <= 6 ? id - 1 : id - 7,
+      };
+    });
+    let secondPageLoaded = false;
+
+    mockGetDbChapter.mockResolvedValue(chapters[0]);
+    mockGetNextChapter.mockImplementation(
+      async (_novelId: number, position: number, page: string) => {
+        if (page === '1') {
+          if (position < 5) {
+            return chapters[position + 1];
+          }
+          return secondPageLoaded ? chapters[6] : undefined;
+        }
+
+        if (page === '2' && position < 13) {
+          return chapters[position + 7];
+        }
+
+        return undefined;
+      },
+    );
+    mockGetChapterCount.mockImplementation(
+      async (_novelId: number, page: string) => {
+        if (page === '1') return 6;
+        if (page === '2') return secondPageLoaded ? 14 : 0;
+        return 0;
+      },
+    );
+    mockFetchPage.mockImplementation(async (_pluginId, _path, page) => ({
+      chapters:
+        page === '2'
+          ? chapters.slice(6).map(ch => ({
+              name: ch.name,
+              path: ch.path,
+              page: ch.page,
+            }))
+          : [],
+    }));
+    mockInsertChapters.mockImplementation(async () => {
+      secondPageLoaded = true;
+    });
+    mockFetchChapter.mockImplementation(
+      async (_pluginId: string, path: string) => `body:${path}`,
+    );
+
+    const { result } = renderHook(() =>
+      useChapter({ current: null }, chapters[0], novel),
+    );
+
+    await waitFor(() =>
+      expect(
+        mockFetchChapter.mock.calls.some(
+          ([, path]) => path === chapters[9].path,
+        ),
+      ).toBe(true),
+    );
+
+    let preparedQueue: Awaited<
+      ReturnType<typeof result.current.prepareTTSChapterQueue>
+    > = [];
+    await act(async () => {
+      preparedQueue = await result.current.prepareTTSChapterQueue();
+    });
+
+    expect(preparedQueue.map(item => item.chapter.id)).toEqual(
+      chapters.slice(0, 10).map(item => item.id),
+    );
+    expect(mockFetchPage).toHaveBeenCalledWith(novel.pluginId, novel.path, '2');
+
+    await act(async () => {
+      await result.current.getChapter(chapters[6]);
+    });
+
+    await waitFor(() =>
+      expect(
+        mockFetchChapter.mock.calls.some(
+          ([, path]) => path === chapters[19].path,
+        ),
+      ).toBe(true),
+    );
+
+    for (const prefetchedChapter of chapters) {
+      expect(
+        mockFetchChapter.mock.calls.filter(
+          ([, path]) => path === prefetchedChapter.path,
+        ),
+      ).toHaveLength(1);
+    }
+  });
 });

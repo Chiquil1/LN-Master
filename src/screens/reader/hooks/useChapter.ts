@@ -43,7 +43,8 @@ export interface PreparedTTSChapter {
   chapterText: string;
 }
 
-const DEFAULT_TTS_CHAPTER_BUFFER_SIZE = 6;
+export const DEFAULT_TTS_CHAPTER_BUFFER_SIZE = 10;
+export const TTS_CHAPTER_PREFETCH_THRESHOLD = 3;
 
 export default function useChapter(
   webViewRef: RefObject<WebView | null>,
@@ -79,6 +80,9 @@ export default function useChapter(
   const { tracker } = useTracker();
   const { trackedNovel, updateAllTrackedNovels } = useTrackedNovel(novel.id);
   const { setImmersiveMode, showStatusAndNavBar } = useFullscreenMode();
+  const pageLoadPromisesRef = useRef<Map<string, Promise<void>>>(new Map());
+  const prefetchWindowRef = useRef<ChapterInfo[]>([]);
+  const prefetchQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   const connectVolumeButton = useCallback(() => {
     const offset = defaultTo(
@@ -145,6 +149,43 @@ export default function useChapter(
     [novel.pluginId],
   );
 
+  const ensurePageLoaded = useCallback(
+    async (page: string) => {
+      const pendingPageLoad = pageLoadPromisesRef.current.get(page);
+      if (pendingPageLoad) {
+        await pendingPageLoad;
+        return;
+      }
+
+      const pageLoad = (async () => {
+        const count = await getChapterCount(novel.id, page);
+        if (count > 0) {
+          return;
+        }
+
+        const sourcePage = await fetchPage(novel.pluginId, novel.path, page);
+
+        await insertChapters(
+          novel.id,
+          sourcePage.chapters.map(ch => ({
+            ...ch,
+            page,
+          })),
+        );
+      })();
+
+      pageLoadPromisesRef.current.set(page, pageLoad);
+      try {
+        await pageLoad;
+      } finally {
+        if (pageLoadPromisesRef.current.get(page) === pageLoad) {
+          pageLoadPromisesRef.current.delete(page);
+        }
+      }
+    },
+    [novel.id, novel.path, novel.pluginId],
+  );
+
   const getNextChapterForTTS = useCallback(
     async (sourceChapter: ChapterInfo) => {
       let nextChap = await getNextChapter(
@@ -171,23 +212,7 @@ export default function useChapter(
       const nextPage = String(currentPage + 1);
 
       try {
-        const count = await getChapterCount(sourceChapter.novelId, nextPage);
-
-        if (count === 0) {
-          const sourcePage = await fetchPage(
-            novel.pluginId,
-            novel.path,
-            nextPage,
-          );
-
-          await insertChapters(
-            sourceChapter.novelId,
-            sourcePage.chapters.map(ch => ({
-              ...ch,
-              page: nextPage,
-            })),
-          );
-        }
+        await ensurePageLoaded(nextPage);
 
         nextChap = await getNextChapter(
           sourceChapter.novelId,
@@ -200,7 +225,7 @@ export default function useChapter(
 
       return nextChap;
     },
-    [novel.path, novel.pluginId, novel.totalPages],
+    [ensurePageLoaded, novel.totalPages],
   );
 
   const getPrevChapterForTTS = useCallback(
@@ -224,23 +249,7 @@ export default function useChapter(
       const prevPage = String(currentPage - 1);
 
       try {
-        const count = await getChapterCount(sourceChapter.novelId, prevPage);
-
-        if (count === 0) {
-          const sourcePage = await fetchPage(
-            novel.pluginId,
-            novel.path,
-            prevPage,
-          );
-
-          await insertChapters(
-            sourceChapter.novelId,
-            sourcePage.chapters.map(ch => ({
-              ...ch,
-              page: prevPage,
-            })),
-          );
-        }
+        await ensurePageLoaded(prevPage);
 
         prevChap = await getPrevChapter(
           sourceChapter.novelId,
@@ -253,7 +262,109 @@ export default function useChapter(
 
       return prevChap;
     },
-    [novel.path, novel.pluginId],
+    [ensurePageLoaded],
+  );
+
+  const prefetchChapterText = useCallback(
+    async (chapterToPrefetch: ChapterInfo) => {
+      const cachedText = chapterTextCache.read(chapterToPrefetch.id);
+      if (cachedText) {
+        return cachedText;
+      }
+
+      const pendingText = loadChapterText(chapterToPrefetch, false);
+      chapterTextCache.write(chapterToPrefetch.id, pendingText);
+
+      try {
+        const rawText = await pendingText;
+        if (
+          !rawText &&
+          chapterTextCache.read(chapterToPrefetch.id) === pendingText
+        ) {
+          chapterTextCache.remove(chapterToPrefetch.id);
+        }
+        return rawText;
+      } catch (e) {
+        if (chapterTextCache.read(chapterToPrefetch.id) === pendingText) {
+          chapterTextCache.remove(chapterToPrefetch.id);
+        }
+        throw e;
+      }
+    },
+    [chapterTextCache, loadChapterText],
+  );
+
+  const appendPrefetchBatch = useCallback(
+    async (startChapter: ChapterInfo, count: number) => {
+      const chaptersToPrefetch: ChapterInfo[] = [];
+      let cursor = startChapter;
+
+      for (let index = 0; index < count; index += 1) {
+        const nextChap = await getNextChapterForTTS(cursor);
+        if (
+          !nextChap ||
+          prefetchWindowRef.current.some(ch => ch.id === nextChap.id)
+        ) {
+          break;
+        }
+
+        prefetchWindowRef.current = [...prefetchWindowRef.current, nextChap];
+        chaptersToPrefetch.push(nextChap);
+        cursor = nextChap;
+      }
+
+      await Promise.allSettled(chaptersToPrefetch.map(prefetchChapterText));
+    },
+    [getNextChapterForTTS, prefetchChapterText],
+  );
+
+  const updatePrefetchWindow = useCallback(
+    async (currentChapter: ChapterInfo) => {
+      let currentIndex = prefetchWindowRef.current.findIndex(
+        item => item.id === currentChapter.id,
+      );
+
+      if (currentIndex === -1) {
+        prefetchWindowRef.current = [currentChapter];
+        await appendPrefetchBatch(
+          currentChapter,
+          DEFAULT_TTS_CHAPTER_BUFFER_SIZE - 1,
+        );
+        return;
+      }
+
+      if (currentIndex > 0) {
+        prefetchWindowRef.current =
+          prefetchWindowRef.current.slice(currentIndex);
+        currentIndex = 0;
+      }
+
+      const remainingChapters =
+        prefetchWindowRef.current.length - currentIndex - 1;
+      if (remainingChapters > TTS_CHAPTER_PREFETCH_THRESHOLD) {
+        return;
+      }
+
+      const lastPrefetchedChapter =
+        prefetchWindowRef.current[prefetchWindowRef.current.length - 1];
+      if (lastPrefetchedChapter) {
+        await appendPrefetchBatch(
+          lastPrefetchedChapter,
+          DEFAULT_TTS_CHAPTER_BUFFER_SIZE,
+        );
+      }
+    },
+    [appendPrefetchBatch],
+  );
+
+  const queueChapterPrefetch = useCallback(
+    (currentChapter: ChapterInfo) => {
+      prefetchQueueRef.current = prefetchQueueRef.current
+        .catch(() => {})
+        .then(() => updatePrefetchWindow(currentChapter))
+        .catch(() => {});
+    },
+    [updatePrefetchWindow],
   );
 
   const prepareTTSChapterQueue = useCallback(
@@ -356,87 +467,21 @@ export default function useChapter(
         const text = cachedText ?? loadChapterText(chap);
 
         const [nextChapResult, prevChapResult, awaitedText] = await Promise.all(
-          [
-            getNextChapter(chap.novelId, chap.position!, chap.page ?? ''),
-            getPrevChapter(chap.novelId, chap.position!, chap.page ?? ''),
-            text,
-          ],
+          [getNextChapterForTTS(chap), getPrevChapterForTTS(chap), text],
         );
 
-        let nextChap = nextChapResult;
-        let prevChap = prevChapResult;
-        const totalPages = novel.totalPages ?? 0;
-
-        // Pre-fetch adjacent page chapters if at a page boundary
-        const currentPage = Number(chap.page);
-
-        if (!nextChap && totalPages > 0 && currentPage < totalPages) {
-          const nextPage = String(currentPage + 1);
-
-          try {
-            const count = await getChapterCount(chap.novelId, nextPage);
-
-            if (count === 0) {
-              const sourcePage = await fetchPage(
-                novel.pluginId,
-                novel.path,
-                nextPage,
-              );
-
-              await insertChapters(
-                chap.novelId,
-                sourcePage.chapters.map(ch => ({
-                  ...ch,
-                  page: nextPage,
-                })),
-              );
-            }
-
-            nextChap = await getNextChapter(
-              chap.novelId,
-              chap.position!,
-              chap.page ?? '',
-            );
-          } catch {}
-        }
-
-        if (!prevChap && currentPage > 1) {
-          const prevPage = String(currentPage - 1);
-
-          try {
-            const count = await getChapterCount(chap.novelId, prevPage);
-
-            if (count === 0) {
-              const sourcePage = await fetchPage(
-                novel.pluginId,
-                novel.path,
-                prevPage,
-              );
-
-              await insertChapters(
-                chap.novelId,
-                sourcePage.chapters.map(ch => ({
-                  ...ch,
-                  page: prevPage,
-                })),
-              );
-            }
-
-            prevChap = await getPrevChapter(
-              chap.novelId,
-              chap.position!,
-              chap.page ?? '',
-            );
-          } catch {}
-        }
+        const nextChap = nextChapResult;
+        const prevChap = prevChapResult;
 
         if (nextChap && !chapterTextCache.read(nextChap.id)) {
-          chapterTextCache.write(nextChap.id, loadChapterText(nextChap));
+          prefetchChapterText(nextChap).catch(() => {});
         }
 
         if (!cachedText) {
           chapterTextCache.write(chap.id, text);
         }
+
+        queueChapterPrefetch(chap);
 
         setChapter(chap);
 
@@ -459,13 +504,15 @@ export default function useChapter(
     [
       chapter,
       chapterTextCache,
+      getNextChapterForTTS,
+      getPrevChapterForTTS,
       loadChapterText,
+      prefetchChapterText,
+      queueChapterPrefetch,
       setChapter,
       setChapterText,
       novel.pluginId,
       novel.name,
-      novel.path,
-      novel.totalPages,
       setLoading,
     ],
   );
