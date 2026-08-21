@@ -33,7 +33,6 @@ Notifications.setNotificationHandler({
   },
 });
 
-
 const App = () => {
   const state = useInitDatabase();
 
@@ -55,11 +54,11 @@ const App = () => {
             <ThemeProvider>
               <PaperProvider>
                 <BottomSheetModalProvider>
-                <StatusBar translucent={true} backgroundColor="transparent" />
-                <Main />
-                <TTSPlayerService />
-                <TTSMiniPlayer />
-              </BottomSheetModalProvider>
+                  <StatusBar translucent={true} backgroundColor="transparent" />
+                  <Main />
+                  <TTSPlayerService />
+                  <TTSMiniPlayer />
+                </BottomSheetModalProvider>
               </PaperProvider>
             </ThemeProvider>
           </SafeAreaProvider>

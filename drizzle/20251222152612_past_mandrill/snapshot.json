@@ -1,9 +1,7 @@
 {
   "dialect": "sqlite",
   "id": "cf9a3ebf-235d-4a1d-8b65-297a5d2847e8",
-  "prevIds": [
-    "00000000-0000-0000-0000-000000000000"
-  ],
+  "prevIds": ["00000000-0000-0000-0000-000000000000"],
   "version": "7",
   "ddl": [
     {
@@ -21,9 +19,7 @@
       "entityType": "columns"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "Category_pk",
       "table": "Category",
@@ -92,9 +88,7 @@
       "entityType": "columns"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "Chapter_pk",
       "table": "Chapter",
@@ -289,9 +283,7 @@
       "entityType": "columns"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "Novel_pk",
       "table": "Novel",
@@ -526,9 +518,7 @@
       "entityType": "columns"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "NovelCategory_pk",
       "table": "NovelCategory",
@@ -587,9 +577,7 @@
       "entityType": "columns"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "Repository_pk",
       "table": "Repository",
