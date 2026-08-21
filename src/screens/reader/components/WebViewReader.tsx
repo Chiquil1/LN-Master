@@ -116,6 +116,7 @@ const TTS_MAX_RETRIES = 1;
 // cortes al pasar a segundo plano antes de que JS vuelva a pedir más cola.
 const TTS_CHAPTER_BUFFER_SIZE = 10;
 const TTS_MAX_SEGMENT_LENGTH = 3000;
+const TTS_CHAPTER_PREFETCH_THRESHOLD = 2;
 
 const onLogMessage = (payload: { nativeEvent: { data: string } }) => {
   const dataPayload = JSON.parse(payload.nativeEvent.data);
