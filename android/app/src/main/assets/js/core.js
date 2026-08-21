@@ -297,21 +297,25 @@ window.tts = new (function () {
     this.textQueue = this.allReadableElements
       .map(el => this.normalizeText(el.innerText))
       .filter(text => !!text);
+
+    // If starting from a specific element, count how many are before it.
+    // This must happen BEFORE the 'tts-queue' post below: React Native reads
+    // startIndex from that message to seed the native background TTS queue,
+    // so elementsRead has to already reflect the real starting position.
+    let startIndex = 0;
+    if (element && element !== reader.chapterElement) {
+      const foundIndex = this.allReadableElements.indexOf(element);
+      startIndex = foundIndex >= 0 ? foundIndex : 0;
+    }
+    this.elementsRead = startIndex;
+
     reader.post({
       type: 'tts-queue',
       data: {
         queue: this.textQueue,
-        startIndex: this.elementsRead,
+        startIndex: startIndex,
       },
     });
-
-    // If starting from a specific element, count how many are before it
-    if (element && element !== reader.chapterElement) {
-      const startIndex = this.allReadableElements.indexOf(element);
-      this.elementsRead = startIndex >= 0 ? startIndex : 0;
-    } else {
-      this.elementsRead = 0;
-    }
 
     this.next();
   };
