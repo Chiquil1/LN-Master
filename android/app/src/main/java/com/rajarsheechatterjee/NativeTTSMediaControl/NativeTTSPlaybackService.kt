@@ -771,6 +771,28 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
         updateNotification()
     }
 
+    private fun releasePlaybackResources() {
+        try {
+            textToSpeech?.stop()
+            textToSpeech?.shutdown()
+        } catch (_: Exception) {
+            // Limpieza best-effort: el motor puede estar ya cerrándose.
+        }
+
+        textToSpeech = null
+        isTtsReady = false
+
+        try {
+            mediaSession?.isActive = false
+            mediaSession?.release()
+        } catch (_: Exception) {
+            // La sesión multimedia también puede estar cerrándose ya.
+        }
+
+        mediaSession = null
+        activeUtteranceId = null
+    }
+
     private fun stopPlayback(stopService: Boolean) {
         pendingRequest = null
         pendingChapterQueueRequest = null
@@ -784,13 +806,13 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
         isPaused = false
         isTestPlayback = false
         activeVoiceRequiresNetwork = false
-        textToSpeech?.stop()
 
         if (stopService) {
-            mediaSession?.isActive = false
+            releasePlaybackResources()
             ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
             stopSelf()
         } else {
+            textToSpeech?.stop()
             updateNotification()
         }
     }
@@ -1053,12 +1075,7 @@ class NativeTTSPlaybackService : Service(), TextToSpeech.OnInitListener {
     }
 
     override fun onDestroy() {
-        textToSpeech?.stop()
-        textToSpeech?.shutdown()
-        textToSpeech = null
-        mediaSession?.isActive = false
-        mediaSession?.release()
-        mediaSession = null
+        releasePlaybackResources()
         super.onDestroy()
     }
 

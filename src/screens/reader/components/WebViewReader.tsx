@@ -112,7 +112,9 @@ type NativeTTSErrorEvent = NativeTTSProgressEvent & {
 
 const TTS_RETRY_DELAY_MS = 750;
 const TTS_MAX_RETRIES = 1;
-const TTS_CHAPTER_BUFFER_SIZE = 6;
+// Mantener la ventana nativa alineada con el prefetch del hook reduce los
+// cortes al pasar a segundo plano antes de que JS vuelva a pedir más cola.
+const TTS_CHAPTER_BUFFER_SIZE = 10;
 const TTS_MAX_SEGMENT_LENGTH = 3000;
 
 const onLogMessage = (payload: { nativeEvent: { data: string } }) => {
@@ -189,6 +191,10 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
   const ttsFallbackVoiceRef = useRef<boolean>(false);
   const ttsRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const bufferedTTSQueueRef = useRef<BufferedTTSQueueItem[]>([]);
+  const nextNativeQueuePreparationRef = useRef<{
+    anchorChapterId: number | null;
+    promise: Promise<BufferedTTSQueueItem[]> | null;
+  } | null>(null);
   const ttsQueuePreparationRef = useRef<Promise<BufferedTTSQueueItem[]> | null>(
     null,
   );
@@ -249,6 +255,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
     ttsRetryCountRef.current = 0;
     ttsFallbackVoiceRef.current = false;
     bufferedTTSQueueRef.current = [];
+    clearNextNativeQueuePreparation();
     ttsQueuePreparationRef.current = null;
     nativeBoundaryRefillPromiseRef.current = null;
     pendingNativeChapterIndexRef.current = null;
@@ -513,6 +520,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       ttsRetryCountRef.current = 0;
       ttsFallbackVoiceRef.current = false;
       lastTTSPlaybackRef.current = null;
+      clearNextNativeQueuePreparation();
 
       if (ttsRetryTimerRef.current) {
         clearTimeout(ttsRetryTimerRef.current);
@@ -600,6 +608,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
         setTTSIsPlaying(true);
 
         pendingNativeChapterIndexRef.current = nativeChapterIndex;
+        maybePrefetchNextNativeQueue(queue, nativeChapterIndex);
 
         if (appStateRef.current === 'active') {
           setTimeout(syncVisibleChapterToNativeQueue, 50);
@@ -686,6 +695,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
         // navegación visual; el audio nativo continúa sin interrupciones.
         if (nativeQueueItem.chapterId !== chapter.id) {
           pendingNativeChapterIndexRef.current = nativeChapterIndex;
+          maybePrefetchNextNativeQueue(queue, nativeChapterIndex);
 
           if (appStateRef.current === 'active') {
             setTimeout(syncVisibleChapterToNativeQueue, 50);
@@ -733,6 +743,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
         clearTTSQueue();
         setTTSCurrentChapterIndex(0);
         updateTTSPlaybackState(false);
+        clearNextNativeQueuePreparation();
         NativeTTSMediaControl.stopNativePlayback();
         webViewRef.current?.injectJavaScript(`
           if (window.tts) { tts.stop(); }
@@ -960,6 +971,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       segmentListener.remove();
       queueFinishedListener.remove();
       nativeErrorListener.remove();
+      clearNextNativeQueuePreparation();
     };
   }, [
     chapter.id,
@@ -1467,6 +1479,61 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
       }))
       .filter(queueItem => queueItem.segments.length > 0);
 
+  const clearNextNativeQueuePreparation = () => {
+    nextNativeQueuePreparationRef.current = null;
+  };
+
+  const prepareNextNativeQueueAhead = async (anchorChapterId: number) => {
+    const currentPrefetch = nextNativeQueuePreparationRef.current;
+
+    if (
+      currentPrefetch?.anchorChapterId === anchorChapterId &&
+      currentPrefetch.promise
+    ) {
+      return currentPrefetch.promise;
+    }
+
+    const promise = prepareBufferedTTSQueue(
+      [],
+      0,
+      anchorChapterId,
+      false,
+    ).catch(error => {
+      console.warn('[TTS] No se pudo adelantar el siguiente buffer:', error);
+      return [];
+    });
+
+    nextNativeQueuePreparationRef.current = {
+      anchorChapterId,
+      promise,
+    };
+
+    return promise;
+  };
+
+  const maybePrefetchNextNativeQueue = (
+    queue: BufferedTTSQueueItem[],
+    nativeChapterIndex: number,
+  ) => {
+    if (queue.length === 0) {
+      return;
+    }
+
+    const remainingChapters = queue.length - nativeChapterIndex - 1;
+
+    if (remainingChapters > TTS_CHAPTER_PREFETCH_THRESHOLD) {
+      return;
+    }
+
+    const anchorChapterId = queue[queue.length - 1]?.chapterId;
+
+    if (typeof anchorChapterId !== 'number') {
+      return;
+    }
+
+    void prepareNextNativeQueueAhead(anchorChapterId);
+  };
+
   const pauseAtNativeChapterBoundary = () => {
     // Conservamos vivo el foreground service. Así el usuario puede pulsar Play
     // y Android volverá a emitir el borde para reintentar la recarga.
@@ -1499,18 +1566,39 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
     }
 
     try {
-      // Para un capítulo que Android está leyendo en segundo plano no usamos
-      // segmentos del DOM visible: reconstruimos todo desde cache/plugin.
-      const bufferedQueue = await prepareBufferedTTSQueue(
-        [],
-        0,
-        boundaryChapterId,
-        false,
-      );
+      const prefetchedQueue = nextNativeQueuePreparationRef.current;
+      let bufferedQueue: BufferedTTSQueueItem[] | null = null;
+
+      if (
+        prefetchedQueue?.anchorChapterId === boundaryChapterId &&
+        prefetchedQueue.promise
+      ) {
+        bufferedQueue = await prefetchedQueue.promise;
+      }
+
+      if (!bufferedQueue || bufferedQueue.length === 0) {
+        // Si el prefetch adelantado no estaba listo o no correspondía al borde
+        // actual, reconstruimos el buffer justo a tiempo con la ruta segura.
+        bufferedQueue = await prepareBufferedTTSQueue(
+          [],
+          0,
+          boundaryChapterId,
+          false,
+        );
+      }
+
       if (refillSessionId !== speechSessionRef.current) {
         return;
       }
 
+      const nextAnchorChapterId =
+        bufferedQueue[bufferedQueue.length - 1]?.chapterId;
+      if (typeof nextAnchorChapterId === 'number') {
+        void prepareNextNativeQueueAhead(nextAnchorChapterId);
+      }
+
+      // Para un capítulo que Android está leyendo en segundo plano no usamos
+      // segmentos del DOM visible: reconstruimos todo desde cache/plugin.
       const boundaryIndex = bufferedQueue.findIndex(
         item => item.chapterId === boundaryChapterId,
       );
@@ -1859,6 +1947,7 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({ onPress }) => {
             ttsFallbackVoiceRef.current = false;
             pendingNativeChapterIndexRef.current = null;
             lastTTSPlaybackRef.current = null;
+            clearNextNativeQueuePreparation();
 
             const currentQueueItem = {
               chapterId: chapter.id,
