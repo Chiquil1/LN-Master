@@ -182,10 +182,8 @@ const WebviewScreen = ({ route, navigation }: WebviewScreenProps) => {
         userAgent={userAgent}
         ref={webViewRef}
         source={source}
-        // Cookie/session sharing
         sharedCookiesEnabled={true}
         thirdPartyCookiesEnabled={true}
-        // Keep normal web functionality enabled
         javaScriptEnabled={true}
         domStorageEnabled={true}
         setDisplayZoomControls={true}

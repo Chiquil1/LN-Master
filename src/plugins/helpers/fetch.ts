@@ -10,7 +10,14 @@ type FetchInit = {
   headers?: Record<string, string> | Headers;
   method?: string;
   body?: FormData | string;
-  [x: string]: string | Record<string, string> | undefined | FormData | Headers;
+  credentials?: RequestCredentials;
+  [x: string]:
+    | string
+    | Record<string, string>
+    | undefined
+    | FormData
+    | Headers
+    | RequestCredentials;
 };
 
 const makeInit = (init?: FetchInit): FetchInit => {
@@ -46,8 +53,8 @@ const makeInit = (init?: FetchInit): FetchInit => {
 };
 
 /**
- * Reads cookies stored by WebView for the requested URL
- * and converts them into a valid Cookie header.
+ * Obtiene las cookies asociadas a la URL desde el almacén
+ * utilizado por el WebView y las convierte en un header Cookie.
  */
 const getWebViewCookieHeader = async (url: string): Promise<string> => {
   try {
@@ -63,10 +70,10 @@ const getWebViewCookieHeader = async (url: string): Promise<string> => {
 };
 
 /**
- * Adds WebView cookies to a request.
+ * Añade las cookies correspondientes a la URL.
  *
- * If the plugin already provides its own Cookie header,
- * it is preserved.
+ * Si el plugin ya proporciona un header Cookie,
+ * respetamos ese valor.
  */
 const applyWebViewCookies = async (
   url: string,
@@ -110,7 +117,10 @@ export const fetchApi = async (
 
   init = await applyWebViewCookies(url, init);
 
-  return await fetch(url, init as RequestInit);
+  return await fetch(url, {
+    ...init,
+    credentials: init.credentials || 'include',
+  } as RequestInit);
 };
 
 const FILE_READER_PREFIX_LENGTH = 'data:application/octet-stream;base64,'
@@ -150,10 +160,13 @@ export const fetchText = async (
   try {
     init = await applyWebViewCookies(url, init);
 
-    const res = await fetch(url, init as RequestInit);
+    const res = await fetch(url, {
+      ...init,
+      credentials: init.credentials || 'include',
+    } as RequestInit);
 
     if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
+      throw new Error(`HTTP ${res.status}: ${url}`);
     }
 
     const blob = await res.blob();
@@ -257,6 +270,7 @@ export const fetchProto = async function (
   return fetch(url, {
     method: 'POST',
     ...init,
+    credentials: init.credentials || 'include',
     body: bodyArray,
   } as RequestInit)
     .then(r => r.blob())
