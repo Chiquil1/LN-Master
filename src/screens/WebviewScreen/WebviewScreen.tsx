@@ -1,16 +1,24 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
 
 import WebView, { WebViewNavigation } from 'react-native-webview';
+
 import type { WebViewProgressEvent } from 'react-native-webview/lib/WebViewTypes';
 
 import { ProgressBar } from 'react-native-paper';
 
 import { getPlugin } from '@plugins/pluginManager';
+
 import { useBackHandler } from '@hooks';
+
 import { useTheme } from '@hooks/persisted';
+
 import { WebviewScreenProps } from '@navigators/types';
+
 import { getUserAgent } from '@hooks/persisted/useUserAgent';
+
 import { resolveUrl } from '@services/plugin/fetch';
+
+import CookieManager from '@preeternal/react-native-cookie-manager';
 
 import {
   WEBVIEW_LOCAL_STORAGE,
@@ -19,6 +27,7 @@ import {
 } from '@plugins/helpers/storage';
 
 import Appbar from './components/Appbar';
+
 import Menu from './components/Menu';
 
 type StorageData = {
@@ -37,16 +46,23 @@ const WebviewScreen = ({ route, navigation }: WebviewScreenProps) => {
   );
 
   const userAgent = useMemo(() => getUserAgent(), []);
+
   const theme = useTheme();
 
   const webViewRef = useRef<WebView<object> | null>(null);
 
   const [progress, setProgress] = useState(0);
+
   const [title, setTitle] = useState(name || '');
+
   const [currentUrl, setCurrentUrl] = useState(uri);
+
   const [canGoBack, setCanGoBack] = useState(false);
+
   const [canGoForward, setCanGoForward] = useState(false);
+
   const [tempData, setTempData] = useState<StorageData>();
+
   const [menuVisible, setMenuVisible] = useState(false);
 
   const handleNavigation = (e: WebViewNavigation) => {
@@ -55,7 +71,9 @@ const WebviewScreen = ({ route, navigation }: WebviewScreenProps) => {
     }
 
     setCurrentUrl(e.url);
+
     setCanGoBack(e.canGoBack);
+
     setCanGoForward(e.canGoForward);
   };
 
@@ -70,7 +88,7 @@ const WebviewScreen = ({ route, navigation }: WebviewScreenProps) => {
     [],
   );
 
-  const saveData = () => {
+  const saveData = async () => {
     if (pluginId && tempData && isSave) {
       store.set(
         pluginId + WEBVIEW_LOCAL_STORAGE,
@@ -82,20 +100,52 @@ const WebviewScreen = ({ route, navigation }: WebviewScreenProps) => {
         JSON.stringify(tempData.sessionStorage || {}),
       );
     }
+
+    try {
+      const cookies = await CookieManager.get(currentUrl);
+
+      const cookieNames = Object.keys(cookies);
+
+      if (pluginId) {
+        store.set(
+          `${pluginId}_WEBVIEW_COOKIES_DEBUG`,
+          JSON.stringify({
+            url: currentUrl,
+            count: cookieNames.length,
+            names: cookieNames,
+          }),
+        );
+      }
+    } catch {
+      if (pluginId) {
+        store.set(
+          `${pluginId}_WEBVIEW_COOKIES_DEBUG`,
+          JSON.stringify({
+            url: currentUrl,
+            count: 0,
+            names: [],
+            error: true,
+          }),
+        );
+      }
+    }
   };
 
   useBackHandler(() => {
     if (menuVisible) {
       setMenuVisible(false);
+
       return true;
     }
 
     if (canGoBack) {
       webViewRef.current?.goBack();
+
       return true;
     }
 
-    saveData();
+    void saveData();
+
     return false;
   });
 
@@ -115,8 +165,9 @@ const WebviewScreen = ({ route, navigation }: WebviewScreenProps) => {
         canGoForward={canGoForward}
         webView={webViewRef}
         setMenuVisible={setMenuVisible}
-        goBack={() => {
-          saveData();
+        goBack={async () => {
+          await saveData();
+
           navigation.goBack();
         }}
       />

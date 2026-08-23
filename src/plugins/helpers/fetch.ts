@@ -2,6 +2,8 @@ import { getUserAgent } from '@hooks/persisted/useUserAgent';
 
 import NativeFile from '@modules/native-file';
 
+import CookieManager from '@preeternal/react-native-cookie-manager';
+
 import { parse as parseProto } from 'protobufjs';
 
 type FetchInit = {
@@ -43,11 +45,70 @@ const makeInit = (init?: FetchInit): FetchInit => {
   return init;
 };
 
+/**
+ * Reads cookies stored by WebView for the requested URL
+ * and converts them into a valid Cookie header.
+ */
+const getWebViewCookieHeader = async (url: string): Promise<string> => {
+  try {
+    const cookies = await CookieManager.get(url);
+
+    return Object.entries(cookies)
+      .filter(([, cookie]) => Boolean(cookie.value))
+      .map(([name, cookie]) => `${name}=${cookie.value}`)
+      .join('; ');
+  } catch {
+    return '';
+  }
+};
+
+/**
+ * Adds WebView cookies to a request.
+ *
+ * If the plugin already provides its own Cookie header,
+ * it is preserved.
+ */
+const applyWebViewCookies = async (
+  url: string,
+  init: FetchInit,
+): Promise<FetchInit> => {
+  const cookieHeader = await getWebViewCookieHeader(url);
+
+  if (!cookieHeader) {
+    return init;
+  }
+
+  if (init.headers instanceof Headers) {
+    if (!init.headers.get('Cookie')) {
+      init.headers.set('Cookie', cookieHeader);
+    }
+
+    return init;
+  }
+
+  const headers = init.headers || {};
+
+  const hasCookieHeader = Object.keys(headers).some(
+    key => key.toLowerCase() === 'cookie',
+  );
+
+  if (!hasCookieHeader) {
+    init.headers = {
+      ...headers,
+      Cookie: cookieHeader,
+    };
+  }
+
+  return init;
+};
+
 export const fetchApi = async (
   url: string,
   init?: FetchInit,
 ): Promise<Response> => {
   init = makeInit(init);
+
+  init = await applyWebViewCookies(url, init);
 
   return await fetch(url, init as RequestInit);
 };
@@ -87,6 +148,8 @@ export const fetchText = async (
   init = makeInit(init);
 
   try {
+    init = await applyWebViewCookies(url, init);
+
     const res = await fetch(url, init as RequestInit);
 
     if (!res.ok) {
@@ -103,6 +166,7 @@ export const fetchText = async (
       };
 
       fr.onerror = () => reject();
+
       fr.onabort = () => reject();
 
       fr.readAsText(blob, encoding);
@@ -187,6 +251,7 @@ export const fetchProto = async function (
   const bodyArray = new Uint8Array(headers.length + encodedrequest.length);
 
   bodyArray.set(headers);
+
   bodyArray.set(encodedrequest, headers.length);
 
   return fetch(url, {
@@ -220,6 +285,7 @@ export const fetchProto = async function (
         };
 
         fr.onerror = () => reject();
+
         fr.onabort = () => reject();
 
         fr.readAsDataURL(blob);
