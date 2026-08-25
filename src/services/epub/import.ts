@@ -4,15 +4,19 @@ import {
   updateNovelInfo,
 } from '@database/queries/NovelQueries';
 import { LOCAL_PLUGIN_ID } from '@plugins/pluginManager';
-import { getString } from '@strings/translations';
+import { getString } from '@i18n/translations';
 import { NOVEL_STORAGE } from '@utils/Storages';
 import { dbManager } from '@database/db';
 import { novelSchema, chapterSchema } from '@database/schema';
-import { BackgroundTaskMetadata } from '@services/ServiceManager';
-import NativeFile from '@specs/NativeFile';
-import NativeZipArchive from '@specs/NativeZipArchive';
-import NativeEpub from '@specs/NativeEpub';
-import { sleep } from '@utils/sleep';
+import type {
+  BackgroundTaskMetadata,
+  EpubImportFile,
+  TaskProgressUpdater,
+} from '@services/backgroundTasks/contracts';
+import NativeFile from '@modules/native-file';
+import NativeZipArchive from '@modules/native-zip-archive';
+import { epub } from '@modules/nitro-epub';
+import { showToast } from '@utils/showToast';
 
 const decodePath = (path: string) => {
   try {
@@ -40,13 +44,13 @@ const insertLocalNovel = async (
   if (insertId !== undefined && insertId >= 0) {
     await updateNovelCategoryById(insertId, [2]);
     const novelDir = NOVEL_STORAGE + '/local/' + insertId;
-    NativeFile.mkdir(novelDir);
+    await NativeFile.mkdir(novelDir);
     const newCoverPath = `file://${novelDir}/${cover?.split(/[/\\]/).pop()}`;
 
     if (cover) {
       const decodedPath = decodePath(cover);
-      if (NativeFile.exists(decodedPath)) {
-        NativeFile.moveFile(decodedPath, newCoverPath);
+      if (await NativeFile.exists(decodedPath)) {
+        await NativeFile.moveFile(decodedPath, newCoverPath);
       }
     }
     await updateNovelInfo({
@@ -67,19 +71,53 @@ const insertLocalNovel = async (
   throw new Error(getString('advancedSettingsScreen.novelInsertFailed'));
 };
 
-// insertLocalChapter is no longer used; batch inserts are performed in importEpub
+const insertLocalChapter = async (
+  novelId: number,
+  fakeId: number,
+  name: string,
+  path: string,
+  releaseTime: string,
+) => {
+  const { insertId } = await dbManager.write(async tx => {
+    return tx
+      .insert(chapterSchema)
+      .values({
+        novelId,
+        name,
+        path: NOVEL_STORAGE + '/local/' + novelId + '/' + fakeId,
+        releaseTime,
+        position: fakeId,
+        isDownloaded: true,
+      })
+      .run();
+  });
+
+  if (insertId !== undefined && insertId >= 0) {
+    let chapterText: string = '';
+    chapterText = await NativeFile.readFile(decodePath(path));
+    if (!chapterText) {
+      return [];
+    }
+    const novelDir = `${NOVEL_STORAGE}/local/${novelId}`;
+    chapterText = chapterText.replace(
+      /[=](?<= href=| src=)(["'])([^]*?)\1/g,
+      (_, __, $2: string) => {
+        return `="file://${novelDir}/${$2.split(/[/\\]/).pop()}"`;
+      },
+    );
+    await NativeFile.mkdir(novelDir + '/' + insertId);
+    await NativeFile.writeFile(
+      `${novelDir}/${insertId}/index.html`,
+      chapterText,
+    );
+    return;
+  }
+  throw new Error(getString('advancedSettingsScreen.chapterInsertFailed'));
+};
 
 export const importEpub = async (
-  {
-    uri,
-    filename,
-  }: {
-    uri: string;
-    filename: string;
-  },
-  setMeta: (
-    transformer: (meta: BackgroundTaskMetadata) => BackgroundTaskMetadata,
-  ) => void,
+  { uri, filename }: EpubImportFile,
+  setMeta: TaskProgressUpdater,
 ) => {
   setMeta(meta => ({
     ...meta,
@@ -87,125 +125,134 @@ export const importEpub = async (
     progress: 0,
   }));
 
-  const epubFilePath =
-    NativeFile.getConstants().ExternalCachesDirectoryPath + '/novel.epub';
+  const epubFilePath = NativeFile.ExternalCachesDirectoryPath + '/novel.epub';
+  const epubDirPath = NativeFile.ExternalCachesDirectoryPath + '/epub';
+
   try {
-    NativeFile.copyFile(uri, epubFilePath);
-  } catch {
-    throw new Error(
-      `Failed to read EPUB file "${filename}". The file may have been moved or deleted. Please try importing again.`,
+    if (await NativeFile.exists(epubDirPath)) {
+      await NativeFile.unlink(epubDirPath);
+    }
+    await NativeFile.mkdir(epubDirPath);
+    await NativeFile.copyFile(uri, epubFilePath);
+    await NativeZipArchive.unzip(epubFilePath, epubDirPath);
+
+    const novel = await epub.parseNovelAndChapters(epubDirPath);
+    if (!novel.name) {
+      novel.name = filename.replace('.epub', '') || 'Untitled';
+    }
+    const novelId = await insertLocalNovel(
+      novel.name,
+      epubDirPath + novel.name, // temporary
+      novel.cover || '',
+      novel.author || '',
+      novel.artist || '',
+      novel.summary || '',
+    );
+    const now = dayjs().toISOString();
+    if (novel.chapters) {
+      for (let i = 0; i < novel.chapters?.length; i++) {
+        const chapter = novel.chapters[i];
+        if (!chapter.name) {
+          chapter.name = chapter.path.split(/[/\\]/).pop() || 'unknown';
+        }
+
+        setMeta(meta => ({
+          ...meta,
+          progressText: chapter.name,
+        }));
+
+        await insertLocalChapter(novelId, i, chapter.name, chapter.path, now);
+
+        setMeta(meta => ({
+          ...meta,
+          progress: i / novel.chapters.length,
+        }));
+      }
+    }
+    const novelDir = NOVEL_STORAGE + '/local/' + novelId;
+
+    setMeta(meta => ({
+      ...meta,
+      progressText: getString('advancedSettingsScreen.importStaticFiles'),
+    }));
+
+    for (const filePath of novel.imagePaths) {
+      const decodedPath = decodePath(filePath);
+
+      if (await NativeFile.exists(decodedPath)) {
+        await NativeFile.moveFile(
+          decodedPath,
+          novelDir + '/' + filePath.split(/[/\\]/).pop(),
+        );
+      }
+    }
+
+    for (const filePath of novel.cssPaths) {
+      const decodedPath = decodePath(filePath);
+      if (await NativeFile.exists(decodedPath)) {
+        await NativeFile.moveFile(
+          decodedPath,
+          novelDir + '/' + filePath.split(/[/\\]/).pop(),
+        );
+      }
+    }
+  } catch (error) {
+    showToast(
+      getString('advancedSettingsScreen.importFailed'),
+      (error as Error).message,
     );
   }
-  const epubDirPath =
-    NativeFile.getConstants().ExternalCachesDirectoryPath + '/epub';
-  if (NativeFile.exists(epubDirPath)) {
-    NativeFile.unlink(epubDirPath);
-  }
-  NativeFile.mkdir(epubDirPath);
-  await NativeZipArchive.unzip(epubFilePath, epubDirPath);
-  const novel = NativeEpub.parseNovelAndChapters(epubDirPath);
-  if (!novel.name) {
-    novel.name = filename.replace('.epub', '') || 'Untitled';
-  }
-  const novelId = await insertLocalNovel(
-    novel.name,
-    epubDirPath + novel.name, // temporary
-    novel.cover || '',
-    novel.author || '',
-    novel.artist || '',
-    novel.summary || '',
-  );
-  const now = dayjs().toISOString();
-  if (novel.chapters && novel.chapters.length) {
-    // Prepare DB rows for batch insert (so we can get inserted ids)
-    const rows = novel.chapters.map((chapter, i) => {
-      const name =
-        chapter.name || chapter.path.split(/[/\\]/).pop() || 'unknown';
-      return {
-        novelId,
-        name,
-        path: NOVEL_STORAGE + '/local/' + novelId + '/' + i,
-        releaseTime: now,
-        position: i,
-        isDownloaded: true,
-      };
-    });
-
-    const inserted: Array<{ id: number }> = await dbManager.write(async tx => {
-      return tx
-        .insert(chapterSchema)
-        .values(rows)
-        .returning({ id: chapterSchema.id })
-        .all();
-    });
-
-    // Write chapter files in parallel with limited concurrency
-    const CONCURRENCY = 6;
-    let completed = 0;
-    const tasks = inserted.map((ins, idx) => async () => {
-      const chapter = novel.chapters![idx];
-      const insertedId = ins.id;
-      const name =
-        chapter.name || chapter.path.split(/[/\\]/).pop() || 'unknown';
-      setMeta(meta => ({ ...meta, progressText: name }));
-
-      let chapterText = '';
-      try {
-        chapterText = NativeFile.readFile(decodePath(chapter.path));
-      } catch {
-        chapterText = '';
-      }
-      if (!chapterText) {
-        completed++;
-        setMeta(meta => ({ ...meta, progress: completed / inserted.length }));
-        return;
-      }
-
-      const novelDir = `${NOVEL_STORAGE}/local/${novelId}`;
-      const adjusted = chapterText.replace(
-        /[=](?<= href=| src=)(["'])([^]*?)\1/g,
-        (_, __, $2: string) => {
-          return `="file://${novelDir}/${$2.split(/[/\\]/).pop()}"`;
-        },
-      );
-
-      NativeFile.mkdir(novelDir + '/' + insertedId);
-      NativeFile.writeFile(`${novelDir}/${insertedId}/index.html`, adjusted);
-      completed++;
-      setMeta(meta => ({ ...meta, progress: completed / inserted.length }));
-    });
-
-    // run in chunks
-    for (let i = 0; i < tasks.length; i += CONCURRENCY) {
-      const batch = tasks.slice(i, i + CONCURRENCY).map(fn => fn());
-      await Promise.all(batch);
-      await sleep(50);
-    }
-  }
-  const novelDir = NOVEL_STORAGE + '/local/' + novelId;
 
   setMeta(meta => ({
     ...meta,
-    progressText: getString('advancedSettingsScreen.importStaticFiles'),
+    progress: 1,
+    isRunning: false,
   }));
+};
 
-  for (const filePath of novel.imagePaths) {
-    const decodedPath = decodePath(filePath);
+export const importEpubBatch = async (
+  { files }: { files: EpubImportFile[] },
+  setMeta: TaskProgressUpdater,
+) => {
+  if (!files.length) return;
 
-    if (NativeFile.exists(decodedPath)) {
-      NativeFile.moveFile(
-        decodedPath,
-        novelDir + '/' + filePath.split(/[/\\]/).pop(),
-      );
-    }
-  }
+  const failures: string[] = [];
 
-  for (const filePath of novel.cssPaths) {
-    const decodedPath = decodePath(filePath);
-    if (NativeFile.exists(decodedPath)) {
-      NativeFile.moveFile(
-        decodedPath,
-        novelDir + '/' + filePath.split(/[/\\]/).pop(),
+  for (let index = 0; index < files.length; index++) {
+    const file = files[index];
+    let fileMeta: BackgroundTaskMetadata = {
+      name: file.filename,
+      isRunning: true,
+      progress: 0,
+      progressText: undefined,
+    };
+    let progressError: unknown;
+    const updateFileProgress: TaskProgressUpdater = transformer => {
+      fileMeta = transformer(fileMeta);
+      try {
+        setMeta(meta => ({
+          ...meta,
+          isRunning: true,
+          progress: (index + (fileMeta.progress ?? 0)) / files.length,
+          progressText: `${index + 1}/${files.length} · ${file.filename}${
+            fileMeta.progressText ? ` · ${fileMeta.progressText}` : ''
+          }`,
+        }));
+      } catch (error) {
+        progressError = error;
+        throw error;
+      }
+    };
+
+    try {
+      await importEpub(file, updateFileProgress);
+    } catch (error) {
+      if (error === progressError) throw error;
+
+      failures.push(
+        `${file.filename}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
       );
     }
   }
@@ -215,4 +262,12 @@ export const importEpub = async (
     progress: 1,
     isRunning: false,
   }));
+
+  if (failures.length) {
+    throw new Error(
+      `${failures.length} of ${
+        files.length
+      } EPUB imports failed: ${failures.join('; ')}`,
+    );
+  }
 };

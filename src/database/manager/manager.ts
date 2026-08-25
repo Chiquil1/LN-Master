@@ -1,9 +1,8 @@
-import { db, drizzleDb } from '@database/db';
+import type { drizzleDb } from '@database/db';
 import type { SQLBatchTuple, Scalar } from '@op-engineering/op-sqlite';
 import { IDbManager } from './manager.d';
 import { DbTaskQueue } from './queue';
 import { Schema } from '../schema';
-import { useEffect, useRef, useState } from 'react';
 import { GetSelectTableName } from 'drizzle-orm/query-builders/select.types';
 import {
   AnyColumn,
@@ -21,7 +20,7 @@ type TransactionParameter = Parameters<
 
 interface ExecutableSelect<TResult = any> {
   toSQL(): Query;
-  all(): Promise<TResult[]>; // Or TResult[] if you are using a synchronous driver
+  all(): Promise<TResult[]>;
   get(): Promise<TResult | undefined>;
 }
 
@@ -77,7 +76,7 @@ class DbManager implements IDbManager {
     query: T,
   ): Awaited<ReturnType<T['get']>> {
     const { sql: sqlString, params } = query.toSQL();
-    return this.db.$client.executeSync(sqlString, params as unknown[])
+    return this.db.$client.executeSync(sqlString, params as any[])
       .rows[0] as Awaited<ReturnType<T['get']>>;
   }
 
@@ -85,7 +84,7 @@ class DbManager implements IDbManager {
     query: T,
   ): Awaited<ReturnType<T['all']>> {
     const { sql: sqlString, params } = query.toSQL();
-    return this.db.$client.executeSync(sqlString, params as unknown[])
+    return this.db.$client.executeSync(sqlString, params as any[])
       .rows as Awaited<ReturnType<T['all']>>;
   }
 
@@ -140,39 +139,4 @@ export const createDbManager = (dbInstance: DrizzleDb) => {
 };
 
 type TableNames = GetSelectTableName<Schema[keyof Schema]>;
-type FireOn = Array<{ table: TableNames; ids?: number[] }>;
-
-export function useLiveQuery<T extends ExecutableSelect>(
-  query: T,
-  fireOn: FireOn,
-  callback?: (data: Awaited<ReturnType<T['all']>>) => void,
-) {
-  type ReturnValue = Awaited<ReturnType<T['all']>>;
-
-  const { sql: sqlString, params } = query.toSQL();
-  const paramsKey = JSON.stringify(params);
-  const fireOnKey = JSON.stringify(fireOn);
-  const cb = useRef(callback ?? (() => {}));
-
-  const [data, setData] = useState<ReturnValue>(() => {
-    const r = db.executeSync(sqlString, params as any[]).rows as ReturnValue;
-    cb.current(r);
-    return r;
-  });
-
-  useEffect(() => {
-    const unsub = db.reactiveExecute({
-      query: sqlString,
-      arguments: params as any[],
-      fireOn,
-      callback: (result: { rows: ReturnValue }) => {
-        setData(result.rows);
-        cb.current(result.rows);
-      },
-    });
-    return unsub;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sqlString, paramsKey, fireOnKey]);
-
-  return data;
-}
+export type FireOn = { table: TableNames; ids?: number[] }[];

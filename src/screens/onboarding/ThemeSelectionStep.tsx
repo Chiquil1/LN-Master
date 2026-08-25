@@ -1,11 +1,5 @@
 import React, { useMemo } from 'react';
-import {
-  View,
-  Text,
-  Pressable,
-  StyleSheet,
-  GestureResponderEvent,
-} from 'react-native';
+import { View, Text, Pressable, StyleSheet } from 'react-native';
 import {
   useMMKVBoolean,
   useMMKVNumber,
@@ -17,10 +11,14 @@ import { ThemePicker } from '@components/ThemePicker/ThemePicker';
 import { ThemeColors } from '@theme/types';
 import { useTheme } from '@hooks/persisted';
 import { darkThemes, lightThemes } from '@theme/md3';
-import { getString } from '@strings/translations';
-import { LegendList } from '@legendapp/list';
+import {
+  getSystemDynamicTheme,
+  isDynamicThemeAvailable,
+  toDynamicThemeColors,
+} from '@theme/dynamic';
+import { getString } from '@i18n/translations';
+import { LegendList } from '@legendapp/list/react-native';
 import Switch from '@components/Switch/Switch';
-import switchTheme from 'react-native-theme-switch-animation';
 
 type ThemeMode = 'light' | 'dark' | 'system';
 
@@ -60,8 +58,16 @@ export default function ThemeSelectionStep() {
   const currentMode = themeMode as ThemeMode;
 
   const availableThemes = useMemo(() => {
-    return theme.isDark ? darkThemes : lightThemes;
-  }, [theme.isDark]);
+    const themes = theme.isDark ? darkThemes : lightThemes;
+    if (!isDynamicThemeAvailable) {
+      return themes;
+    }
+
+    return [
+      toDynamicThemeColors(getSystemDynamicTheme(), theme.isDark),
+      ...themes,
+    ];
+  }, [theme]);
 
   const themeModeOptions: SegmentedControlOption<ThemeMode>[] = useMemo(
     () => [
@@ -81,41 +87,12 @@ export default function ThemeSelectionStep() {
     [],
   );
 
-  const handleModeChange = (mode: ThemeMode, event: GestureResponderEvent) => {
+  const handleModeChange = (mode: ThemeMode) => {
     setThemeMode(mode);
-    event.currentTarget.measure((_x1, _y1, width, height, px, py) => {
-      switchTheme({
-        switchThemeFunction: () => {},
-        animationConfig: {
-          type: 'circular',
-          duration: 400,
-          startingPoint: {
-            cy: py + height / 2,
-            cx: px + width / 2,
-          },
-        },
-      });
-    });
   };
 
-  const handleThemeSelect = (
-    selectedTheme: ThemeColors,
-    event: GestureResponderEvent,
-  ) => {
+  const handleThemeSelect = (selectedTheme: ThemeColors) => {
     setThemeId(selectedTheme.id);
-    event.currentTarget.measure((_x1, _y1, width, height, px, py) => {
-      switchTheme({
-        switchThemeFunction: () => {},
-        animationConfig: {
-          type: 'circular',
-          duration: 400,
-          startingPoint: {
-            cy: py + height / 2,
-            cx: px + width / 2,
-          },
-        },
-      });
-    });
   };
 
   return (
@@ -141,7 +118,7 @@ export default function ThemeSelectionStep() {
             <ThemePicker
               currentTheme={theme}
               theme={item}
-              onPress={e => handleThemeSelect(item, e)}
+              onPress={() => handleThemeSelect(item)}
             />
           </View>
         )}

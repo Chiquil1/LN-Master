@@ -1,10 +1,11 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   StyleSheet,
   View,
   ActivityIndicator,
   FlatList,
   NativeScrollEvent,
+  FlatListProps,
 } from 'react-native';
 
 import * as WebBrowser from 'expo-web-browser';
@@ -69,22 +70,20 @@ const BrowseMalScreen = ({ navigation }: BrowseMalScreenProps) => {
   };
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     getNovels();
   }, [getNovels]);
 
-  const renderItem = useCallback(
-    ({ item }: { item: any }) => (
-      <DiscoverNovelCard
-        novel={item}
-        theme={theme}
-        onPress={() =>
-          navigation.navigate('GlobalSearchScreen', {
-            searchText: item.novelName,
-          })
-        }
-      />
-    ),
-    [navigation, theme],
+  const renderItem: FlatListProps<any>['renderItem'] = ({ item }) => (
+    <DiscoverNovelCard
+      novel={item}
+      theme={theme}
+      onPress={() =>
+        navigation.navigate('GlobalSearchScreen', {
+          searchText: item.novelName,
+        })
+      }
+    />
   );
 
   const isCloseToBottom = ({

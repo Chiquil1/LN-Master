@@ -1,26 +1,14 @@
 import { createMMKV } from 'react-native-mmkv';
 
 export const MMKVStorage = createMMKV();
-export function getMMKVObject<T = unknown>(key: string): T | undefined {
+export function getMMKVObject<T>(key: string) {
   const data = MMKVStorage.getString(key);
-  if (!data) return undefined;
-  try {
+  if (data) {
     return JSON.parse(data) as T;
-  } catch {
-    // If parsing fails, return undefined to avoid throws from corrupted data
-    return undefined;
   }
+  return undefined;
 }
 
-export function setMMKVObject<T = unknown>(key: string, obj: T): void {
+export function setMMKVObject<T>(key: string, obj: T) {
   MMKVStorage.set(key, JSON.stringify(obj));
-}
-
-export function deleteMMKVKey(key: string): void {
-  const maybeDelete = (
-    MMKVStorage as unknown as { delete?: (k: string) => void }
-  ).delete;
-  if (typeof maybeDelete === 'function') {
-    maybeDelete.call(MMKVStorage, key);
-  }
 }

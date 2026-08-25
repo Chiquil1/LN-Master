@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect } from 'react';
+import { useCallback, useEffect } from 'react';
 import { FlatList, StyleSheet } from 'react-native';
 import { FAB, Portal } from 'react-native-paper';
 
@@ -10,19 +10,16 @@ import {
   updateRepository,
 } from '@database/queries/RepositoryQueries';
 import { Repository } from '@database/types';
-import { useBackHandler, useBoolean } from '@hooks/index';
-import { usePlugins, useTheme } from '@hooks/persisted';
-import { getString } from '@strings/translations';
+import { useBoolean } from '@hooks/index';
+import { usePluginActions, useTheme } from '@hooks/persisted';
+import { getString } from '@i18n/translations';
 
 import AddRepositoryModal from './components/AddRepositoryModal';
 import RepositoryCard from './components/RepositoryCard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import {
-  RespositorySettingsScreenProps,
-  RootStackParamList,
-} from '@navigators/types';
+import { RespositorySettingsScreenProps } from '@navigators/types';
 import { showToast } from '@utils/showToast';
-import { useLiveQuery } from '@database/manager/manager';
+import { useLiveQuery } from '@database/manager/liveQuery';
 import { repositorySchema } from '@database/schema';
 import { dbManager } from '@database/db';
 
@@ -32,7 +29,7 @@ const SettingsBrowseScreen = ({
 }: RespositorySettingsScreenProps) => {
   const theme = useTheme();
   const { bottom, right } = useSafeAreaInsets();
-  const { refreshPlugins } = usePlugins();
+  const { refreshPlugins } = usePluginActions();
 
   const repositories = useLiveQuery(dbManager.select().from(repositorySchema), [
     { table: 'Repository' },
@@ -73,14 +70,6 @@ const SettingsBrowseScreen = ({
     }
   }, [params, upsertRepository]);
 
-  useBackHandler(() => {
-    if (!navigation.canGoBack()) {
-      navigation.popTo<keyof RootStackParamList>('BottomNavigator');
-      return true;
-    }
-    return false;
-  });
-
   return (
     <SafeAreaView excludeTop>
       <Appbar
@@ -89,7 +78,6 @@ const SettingsBrowseScreen = ({
           if (navigation.canGoBack()) {
             navigation.goBack();
           }
-          navigation.popTo<keyof RootStackParamList>('BottomNavigator');
         }}
         theme={theme}
       />

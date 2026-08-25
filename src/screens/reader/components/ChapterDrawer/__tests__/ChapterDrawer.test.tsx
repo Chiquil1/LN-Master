@@ -35,7 +35,7 @@ jest.mock('react-native-safe-area-context', () => ({
   useSafeAreaInsets: () => ({ bottom: 0 }),
 }));
 
-jest.mock('@strings/translations', () => ({
+jest.mock('@i18n/translations', () => ({
   getString: (key: string) => key,
 }));
 
@@ -66,7 +66,7 @@ jest.mock('../RenderListChapter', () => {
     );
 });
 
-jest.mock('@legendapp/list', () => {
+jest.mock('@legendapp/list/react-native', () => {
   const React = require('react');
   const { Pressable, Text, View } = require('react-native');
 

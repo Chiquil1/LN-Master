@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   StyleSheet,
   View,
@@ -147,22 +147,20 @@ const BrowseALScreen = ({ navigation }: BrowseALScreenProps) => {
   };
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     searchAniList(true);
   }, [searchAniList]);
 
-  const renderItem = useCallback<ListRenderItem<ALNovel>>(
-    ({ item }) => (
-      <DiscoverNovelCard
-        novel={item}
-        theme={theme}
-        onPress={() =>
-          navigation.navigate('GlobalSearchScreen', {
-            searchText: item.novelName,
-          })
-        }
-      />
-    ),
-    [navigation, theme],
+  const renderItem: ListRenderItem<ALNovel> = ({ item }) => (
+    <DiscoverNovelCard
+      novel={item}
+      theme={theme}
+      onPress={() =>
+        navigation.navigate('GlobalSearchScreen', {
+          searchText: item.novelName,
+        })
+      }
+    />
   );
 
   const ListEmptyComponent = useCallback(
@@ -227,11 +225,6 @@ const BrowseALScreen = ({ navigation }: BrowseALScreenProps) => {
               </View>
             ) : null
           }
-          initialNumToRender={10}
-          windowSize={21}
-          removeClippedSubviews
-          maxToRenderPerBatch={10}
-          updateCellsBatchingPeriod={50}
         />
       )}
     </SafeAreaView>

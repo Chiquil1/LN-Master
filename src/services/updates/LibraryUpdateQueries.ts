@@ -3,13 +3,12 @@ import { ChapterItem, SourceNovel } from '@plugins/types';
 import { getPlugin, LOCAL_PLUGIN_ID } from '@plugins/pluginManager';
 import { NOVEL_STORAGE } from '@utils/Storages';
 import { downloadFile } from '@plugins/helpers/fetch';
-import ServiceManager from '@services/ServiceManager';
+import type { BackgroundTaskEnqueuer } from '@services/backgroundTasks/contracts';
 import { dbManager } from '@database/db';
 import { novelSchema, chapterSchema } from '@database/schema';
 import { eq, and, inArray } from 'drizzle-orm';
-import NativeFile from '@specs/NativeFile';
+import NativeFile from '@modules/native-file';
 import { insertChapters } from '@database/queries/ChapterQueries';
-import { sleep } from '@utils/sleep';
 
 /**
  * Update novel metadata in the database including cover image.
@@ -23,8 +22,8 @@ const updateNovelMetadata = async (
   let cover = novel.cover;
   const novelDir = `${NOVEL_STORAGE}/${pluginId}/${novelId}`;
 
-  if (!NativeFile.exists(novelDir)) {
-    NativeFile.mkdir(novelDir);
+  if (!(await NativeFile.exists(novelDir))) {
+    await NativeFile.mkdir(novelDir);
   }
 
   if (cover) {
@@ -79,11 +78,13 @@ const updateNovelTotalPages = async (novelId: number, totalPages: number) => {
  * Distinguishes between new chapters (triggers download) and existing chapters (updates metadata).
  */
 const updateNovelChapters = async (
+  pluginId: string,
   novelName: string,
   novelId: number,
   chapters: ChapterItem[],
   downloadNewChapters?: boolean,
   page?: string,
+  enqueue?: BackgroundTaskEnqueuer,
 ) => {
   if (!chapters.length) {
     return;
@@ -115,7 +116,7 @@ const updateNovelChapters = async (
     touchUpdatedTime: true,
   });
 
-  if (downloadNewChapters && newPaths.length) {
+  if (downloadNewChapters && newPaths.length && enqueue) {
     const insertedNewChapters = await dbManager
       .select({
         id: chapterSchema.id,
@@ -138,14 +139,19 @@ const updateNovelChapters = async (
       ]),
     );
 
-    for (const insertedChapter of insertedNewChapters) {
-      ServiceManager.manager.addTask({
+    if (insertedNewChapters.length) {
+      enqueue({
         name: 'DOWNLOAD_CHAPTER',
         data: {
-          chapterId: insertedChapter.id,
           novelName,
-          chapterName:
-            chapterNameByPath.get(insertedChapter.path) || insertedChapter.name,
+          novelId,
+          pluginId,
+          chapters: insertedNewChapters.map(insertedChapter => ({
+            chapterId: insertedChapter.id,
+            chapterName:
+              chapterNameByPath.get(insertedChapter.path) ||
+              insertedChapter.name,
+          })),
         },
       });
     }
@@ -155,6 +161,7 @@ const updateNovelChapters = async (
 export interface UpdateNovelOptions {
   downloadNewChapters?: boolean;
   refreshNovelMetadata?: boolean;
+  enqueue?: BackgroundTaskEnqueuer;
 }
 
 const getStoredTotalPages = async (novelId: number): Promise<number> => {
@@ -179,7 +186,7 @@ const updateNovel = async (
   if (pluginId === LOCAL_PLUGIN_ID) {
     return;
   }
-  const { downloadNewChapters, refreshNovelMetadata } = options;
+  const { downloadNewChapters, refreshNovelMetadata, enqueue } = options;
 
   const oldTotalPages = await getStoredTotalPages(novelId);
 
@@ -191,10 +198,13 @@ const updateNovel = async (
     await updateNovelTotalPages(novelId, novel.totalPages);
   }
   await updateNovelChapters(
+    pluginId,
     novel.name,
     novelId,
     novel.chapters || [],
     downloadNewChapters,
+    undefined,
+    enqueue,
   );
 
   // For paged novels: re-fetch the last known page and fetch any new pages
@@ -210,47 +220,31 @@ const updateNovel = async (
             String(oldTotalPages),
           );
           await updateNovelChapters(
+            pluginId,
             novel.name,
             novelId,
             sourcePage.chapters || [],
             downloadNewChapters,
             String(oldTotalPages),
+            enqueue,
           );
         } catch {}
       }
 
-      // Fetch any new pages that were added — run with limited concurrency
-      const CONCURRENCY = 3;
-      const pages: number[] = [];
-      for (let p = oldTotalPages + 1; p <= novel.totalPages; p++) pages.push(p);
-
-      const chunks: number[][] = [];
-      for (let i = 0; i < pages.length; i += CONCURRENCY) {
-        chunks.push(pages.slice(i, i + CONCURRENCY));
-      }
-
-      for (const chunk of chunks) {
-        await Promise.all(
-          chunk.map(async pageNum => {
-            try {
-              const sourcePage = await fetchPage(
-                pluginId,
-                novelPath,
-                String(pageNum),
-              );
-              await updateNovelChapters(
-                novel.name,
-                novelId,
-                sourcePage.chapters || [],
-                downloadNewChapters,
-                String(pageNum),
-              );
-            } catch {
-              // ignore page-level failures
-            }
-          }),
-        );
-        await sleep(150);
+      // Fetch any new pages that were added
+      for (let page = oldTotalPages + 1; page <= novel.totalPages; page++) {
+        try {
+          const sourcePage = await fetchPage(pluginId, novelPath, String(page));
+          await updateNovelChapters(
+            pluginId,
+            novel.name,
+            novelId,
+            sourcePage.chapters || [],
+            downloadNewChapters,
+            String(page),
+            enqueue,
+          );
+        } catch {}
       }
     }
   }
@@ -265,17 +259,19 @@ const updateNovelPage = async (
   novelPath: string,
   novelId: number,
   page: string,
-  options: Pick<UpdateNovelOptions, 'downloadNewChapters'>,
+  options: Pick<UpdateNovelOptions, 'downloadNewChapters' | 'enqueue'>,
 ) => {
   const { downloadNewChapters } = options;
   const sourcePage = await fetchPage(pluginId, novelPath, page);
 
   await updateNovelChapters(
+    pluginId,
     novelName,
     novelId,
     sourcePage.chapters || [],
     downloadNewChapters,
     page,
+    options.enqueue,
   );
 };
 

@@ -6,10 +6,6 @@ import type {
 } from 'drizzle-orm';
 import { SQLitePreparedQuery } from 'drizzle-orm/sqlite-core';
 
-// Align manager types with the actual Drizzle DB instance exported from `db.ts`.
-// Using `typeof import(...)` keeps this declaration in sync with runtime types.
-export type DrizzleDb = typeof import('../db').drizzleDb;
-
 // Define the TransactionParameter type based on your DrizzleDb
 export type TransactionParameter = SQLiteTransaction<
   'async',
@@ -32,7 +28,7 @@ export interface IDbManager {
     fn: (
       tx: TransactionParameter,
       ph: (arg: Extract<keyof T, string>) => Placeholder,
-    ) => SQLitePreparedQuery<unknown>,
+    ) => SQLitePreparedQuery<any>,
   ): Promise<void>;
 
   /**
@@ -67,7 +63,7 @@ export interface IDbManager {
    * const result = await db.with(sq).select({ name: sq.name }).from(sq);
    * ```
    */
-  $with: DrizzleDb['$with'];
+  $with: any;
 
   /**
    * Builds a count query.
@@ -88,7 +84,7 @@ export interface IDbManager {
    * const activeUsers = await db.$count(users, eq(users.status, 'active'));
    * ```
    */
-  $count: DrizzleDb['$count'];
+  $count: any;
 
   /**
    * Provides access to relational queries defined by your Drizzle schema.
@@ -98,7 +94,7 @@ export interface IDbManager {
    *
    * See docs: {@link https://orm.drizzle.team/docs/relations}
    */
-  readonly query: DrizzleDb['query'];
+  readonly query: any;
 
   /**
    * Incorporates a previously defined CTE (using `$with`) into the main query.
@@ -119,7 +115,7 @@ export interface IDbManager {
    * const result = await db.with(sq).select().from(sq);
    * ```
    */
-  with: DrizzleDb['with'];
+  with: any;
 
   /**
    * Creates a select query.
@@ -157,7 +153,7 @@ export interface IDbManager {
    *   .from(cars);
    * ```
    */
-  select: DrizzleDb['select'];
+  select: any;
 
   /**
    * Adds `distinct` expression to the select query.
@@ -184,7 +180,7 @@ export interface IDbManager {
    *   .orderBy(cars.brand);
    * ```
    */
-  selectDistinct: DrizzleDb['selectDistinct'];
+  selectDistinct: any;
 
   /**
    * Executes a raw SQL query or an {@link SQLWrapper} expression.
@@ -203,7 +199,7 @@ export interface IDbManager {
    *
    * @see https://orm.drizzle.team/docs/advanced-queries#run-raw-sql
    */
-  run: DrizzleDb['run'];
+  run: any;
 
   /**
    * Executes a raw SQL query or an {@link SQLWrapper} expression and returns all resulting rows.
@@ -222,7 +218,7 @@ export interface IDbManager {
    *
    * @see https://orm.drizzle.team/docs/advanced-queries#run-raw-sql
    */
-  all: DrizzleDb['all'];
+  all: any;
 
   /**
    * Executes a raw SQL query or an {@link SQLWrapper} expression and returns a single row.
@@ -240,7 +236,7 @@ export interface IDbManager {
    *
    * @see https://orm.drizzle.team/docs/advanced-queries#run-raw-sql
    */
-  get: DrizzleDb['get'];
+  get: any;
 
   /**
    * Executes a raw SQL query or an {@link SQLWrapper} expression and returns all results as an array of arrays (values).
@@ -260,7 +256,7 @@ export interface IDbManager {
    *
    * @see https://orm.drizzle.team/docs/advanced-queries#run-raw-sql
    */
-  values: DrizzleDb['values'];
+  values: any;
 
   /**
    * Executes a series of database operations within a single transaction.
@@ -283,7 +279,7 @@ export interface IDbManager {
    * });
    * ```
    */
-  transaction: DrizzleDb['transaction'];
+  transaction: any;
 
   /**
    * Performs write operations within a transaction.

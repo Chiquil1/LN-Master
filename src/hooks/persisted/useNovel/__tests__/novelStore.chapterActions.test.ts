@@ -1,17 +1,18 @@
 import '../../../__tests__/mocks';
 import { ChapterInfo, NovelInfo } from '@database/types';
+import { ChapterRow } from '@database/schema';
 import { createBootstrapService } from '../store-helper/bootstrapService';
 import {
   bookmarkChaptersAction,
   ChapterActionsDependencies,
   deleteChapterAction,
   deleteChaptersAction,
+  increaseTimeSpentAction,
   markChapterReadAction,
   markChaptersReadAction,
   markChaptersUnreadAction,
   markPreviouschaptersReadAction,
   markPreviousChaptersUnreadAction,
-  refreshChaptersAction,
   updateChapterProgressAction,
 } from '../store/chapterActions';
 import { createNovelStoreChapterActions } from '../store/novelStore.chapterActions';
@@ -27,10 +28,11 @@ jest.mock('../store/chapterActions', () => {
     markChapterReadAction: jest.fn(),
     markChaptersReadAction: jest.fn(),
     markChaptersUnreadAction: jest.fn(),
+    markChaptersUnreadAndResetProgressAction: jest.fn(),
     markPreviouschaptersReadAction: jest.fn(),
     markPreviousChaptersUnreadAction: jest.fn(),
-    refreshChaptersAction: jest.fn(),
     updateChapterProgressAction: jest.fn(),
+    increaseTimeSpentAction: jest.fn(),
   };
 });
 
@@ -48,9 +50,15 @@ interface TestState {
   fetching: boolean;
   novelSettings: NovelSettingsWithoutSort;
   batchInformation: BatchInfo;
+  actions: {
+    getChapters: jest.Mock<Promise<void>, []>;
+  };
 }
 
-const makeChapter = (id: number, overrides: Partial<ChapterInfo> = {}) => ({
+const makeChapter = (
+  id: number,
+  overrides: Partial<ChapterRow> = {},
+): ChapterRow => ({
   id,
   novelId: 1,
   path: `/chapter/${id}`,
@@ -65,7 +73,9 @@ const makeChapter = (id: number, overrides: Partial<ChapterInfo> = {}) => ({
   page: '1',
   progress: 0,
   position: id - 1,
+  timeSpent: 0,
   ...overrides,
+  scanlator: overrides.scanlator ?? null,
 });
 
 const mockNovel: NovelInfo = {
@@ -83,9 +93,11 @@ const createDeps = (): jest.Mocked<ChapterActionsDependencies> => ({
   markPreviousChaptersUnread: jest.fn().mockResolvedValue(undefined),
   markChaptersUnread: jest.fn().mockResolvedValue(undefined),
   updateChapterProgress: jest.fn().mockResolvedValue(undefined),
+  updateChapterProgressByIds: jest.fn().mockResolvedValue(undefined),
   deleteChapter: jest.fn().mockResolvedValue(undefined),
   deleteChapters: jest.fn().mockResolvedValue(undefined),
   getPageChapters: jest.fn().mockResolvedValue([]),
+  increaseTimeSpent: jest.fn().mockResolvedValue(undefined),
   showToast: jest.fn(),
   getString: jest
     .fn<
@@ -105,6 +117,9 @@ const createHarness = (overrides: Partial<TestState> = {}) => {
     fetching: false,
     novelSettings: { filter: [], showChapterTitles: true },
     batchInformation: { batch: 0, total: 4 },
+    actions: {
+      getChapters: jest.fn().mockResolvedValue(undefined),
+    },
     ...overrides,
   };
 
@@ -123,6 +138,11 @@ const createHarness = (overrides: Partial<TestState> = {}) => {
   const transformChapters = jest.fn((chs: ChapterInfo[]) =>
     chs.map(ch => ({ ...ch, name: `[tx] ${ch.name}` })),
   );
+  let requestVersion = 0;
+  const chapterRequestCoordinator = {
+    current: jest.fn(() => requestVersion),
+    invalidate: jest.fn(() => ++requestVersion),
+  };
 
   const actions = createNovelStoreChapterActions({
     //@ts-expect-error partial state/actions for testing
@@ -130,6 +150,7 @@ const createHarness = (overrides: Partial<TestState> = {}) => {
     get,
     bootstrapService,
     chapterActionsDependencies: chapterDeps,
+    chapterRequestCoordinator,
     transformChapters,
     defaultChapterSort: 'positionAsc',
   });
@@ -140,6 +161,7 @@ const createHarness = (overrides: Partial<TestState> = {}) => {
     set,
     bootstrapService,
     chapterDeps,
+    chapterRequestCoordinator,
     transformChapters,
   };
 };
@@ -210,6 +232,27 @@ describe('novelStore.chapterActions', () => {
     expect(harness.set).not.toHaveBeenCalled();
   });
 
+  it('ignores a next-batch result invalidated by a page or filter load', async () => {
+    const harness = createHarness();
+    let resolveBatch!: (value: {
+      batch: number;
+      chapters: ChapterRow[];
+    }) => void;
+    harness.bootstrapService.getNextChapterBatch.mockReturnValue(
+      new Promise(resolve => {
+        resolveBatch = resolve;
+      }),
+    );
+
+    const request = harness.actions.getNextChapterBatch();
+    harness.chapterRequestCoordinator.invalidate();
+    resolveBatch({ batch: 1, chapters: [makeChapter(2)] });
+    await request;
+
+    expect(harness.getState().batchInformation.batch).toBe(0);
+    expect(harness.getState().chapters.map(chapter => chapter.id)).toEqual([1]);
+  });
+
   it('loadUpToBatch merges each loaded batch through onBatchLoaded callback', async () => {
     const harness = createHarness();
     harness.bootstrapService.loadUpToBatch.mockImplementation(async params => {
@@ -267,6 +310,28 @@ describe('novelStore.chapterActions', () => {
     expect(harness.getState().chapters.map(ch => ch.id)).toEqual([
       1, 2, 3, 4, 5,
     ]);
+  });
+
+  it('ignores loaded batches after the request generation changes', async () => {
+    const harness = createHarness();
+    let resolveLoad!: () => void;
+    harness.bootstrapService.loadUpToBatch.mockImplementation(
+      params =>
+        new Promise<void>(resolve => {
+          resolveLoad = () => {
+            params.onBatchLoaded(1, [makeChapter(2)]);
+            resolve();
+          };
+        }),
+    );
+
+    const request = harness.actions.loadUpToBatch(1);
+    harness.chapterRequestCoordinator.invalidate();
+    resolveLoad();
+    await request;
+
+    expect(harness.getState().batchInformation.batch).toBe(0);
+    expect(harness.getState().chapters.map(chapter => chapter.id)).toEqual([1]);
   });
 
   it('chapterTextCache supports read/write/remove/clear through state-backed cache', () => {
@@ -337,21 +402,12 @@ describe('novelStore.chapterActions', () => {
     expect(harness.getState().chapters[0].unread).toBe(false);
   });
 
-  it('refreshChapters delegates computed args and fallback currentPage for guard-friendly params', () => {
+  it('refreshChapters delegates to the guarded store loader', () => {
     const harness = createHarness({ pages: [], pageIndex: 3, fetching: true });
 
     harness.actions.refreshChapters();
 
-    expect(refreshChaptersAction).toHaveBeenCalledWith(
-      expect.objectContaining({
-        novel: mockNovel,
-        fetching: true,
-        settingsSort: 'positionAsc',
-        settingsFilter: [],
-        currentPage: '1',
-        deps: harness.chapterDeps,
-      }),
-    );
+    expect(harness.getState().actions.getChapters).toHaveBeenCalledTimes(1);
   });
 
   it('delegates remaining chapter action entry points to low-level helpers', () => {
@@ -405,5 +461,19 @@ describe('novelStore.chapterActions', () => {
       expect.any(Function),
       harness.chapterDeps,
     );
+  });
+  it('increaseTimeSpent delegates to the low-level action with dependencies', () => {
+    const harness = createHarness();
+    const chaptersBefore = harness.getState().chapters;
+
+    harness.actions.increaseTimeSpent(1, 200);
+
+    expect(increaseTimeSpentAction).toHaveBeenCalledWith(
+      1,
+      200,
+      harness.chapterDeps,
+    );
+    // Persisted only: the chapter list is not rebuilt for reading time.
+    expect(harness.getState().chapters).toBe(chaptersBefore);
   });
 });

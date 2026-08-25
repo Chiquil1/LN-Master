@@ -53,91 +53,70 @@ function formatUtcDate(date) {
 }
 
 function getGitHash() {
+  return execSync('git rev-parse --short HEAD').toString().trim();
+}
+
+function readEnvValue(filePath, key) {
+  if (!fs.existsSync(filePath)) {
+    return undefined;
+  }
+
+  const line = fs
+    .readFileSync(filePath, 'utf8')
+    .split(/\r?\n/)
+    .find(entry => entry.startsWith(`${key}=`));
+
+  if (!line) {
+    return undefined;
+  }
+
+  const value = line.slice(key.length + 1).trim();
+
+  if (!value || value === 'undefined') {
+    return undefined;
+  }
+
   try {
-    return execSync('git rev-parse --short HEAD', {
-      stdio: ['ignore', 'pipe', 'ignore'],
-    })
-      .toString()
-      .trim();
+    const parsedValue = JSON.parse(value);
+    return typeof parsedValue === 'string' ? parsedValue : value;
   } catch {
-    return 'unknown';
+    return value;
   }
 }
 
-function normalizeEnvValue(value) {
-  if (
-    value === undefined ||
-    value === null ||
-    value === true ||
-    value === 'undefined'
-  ) {
-    return '';
+function resolveOptionalValue({ argument, existingValue, environmentValue }) {
+  const value = argument ?? existingValue ?? environmentValue;
+
+  if (value === undefined || value === null || value === '') {
+    return undefined;
+  }
+
+  if (value === true) {
+    throw new Error('Expected a value after the client ID argument');
   }
 
   return String(value);
 }
 
-function resolveEnvValue(...values) {
-  for (const value of values) {
-    const normalizedValue = normalizeEnvValue(value);
-
-    if (normalizedValue) {
-      return normalizedValue;
-    }
-  }
-
-  return '';
+function formatEnvEntry(key, value) {
+  return value === undefined ? undefined : `${key}=${JSON.stringify(value)}`;
 }
 
-function parseEnvContent(content) {
-  const values = {};
-
-  content.split(/\r?\n/).forEach(rawLine => {
-    const line = rawLine.trim();
-
-    if (!line || line.startsWith('#')) {
-      return;
-    }
-
-    const normalizedLine = line.startsWith('export ')
-      ? line.slice('export '.length).trim()
-      : line;
-    const eqIndex = normalizedLine.indexOf('=');
-
-    if (eqIndex === -1) {
-      return;
-    }
-
-    const key = normalizedLine.slice(0, eqIndex).trim();
-    let value = normalizedLine.slice(eqIndex + 1).trim();
-
-    if (!key) {
-      return;
-    }
-
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      try {
-        value = JSON.parse(value);
-      } catch {
-        value = value.slice(1, -1);
-      }
-    }
-
-    values[key] = value;
-  });
-
-  return values;
+function formatTypeScriptValue(value) {
+  return JSON.stringify(value) ?? 'undefined';
 }
 
-function readEnvFile(filePath) {
-  if (!fs.existsSync(filePath)) {
-    return {};
-  }
+function writeFileAtomically(filePath, content) {
+  const temporaryPath = `${filePath}.${process.pid}.tmp`;
 
-  return parseEnvContent(fs.readFileSync(filePath, 'utf8'));
+  try {
+    fs.writeFileSync(temporaryPath, content, 'utf8');
+    fs.renameSync(temporaryPath, filePath);
+  } finally {
+    if (fs.existsSync(temporaryPath)) {
+      fs.rmSync(temporaryPath);
+    }
+  }
 }
 
 function getHiddenEnvFiles(rootDir) {
@@ -174,42 +153,39 @@ const projectRoot = path.join(__dirname, '..');
 const envFilePath = path.join(projectRoot, '.env');
 
 const buildType = args['build-type'] || 'Beta';
-const existingEnvValues = readEnvFile(envFilePath);
-const { files: hiddenEnvFiles, content: hiddenEnvContent } =
-  readHiddenEnvFiles(projectRoot);
-const hiddenEnvValues = hiddenEnvFiles.reduce((values, filePath) => {
-  return {
-    ...values,
-    ...readEnvFile(filePath),
-  };
-}, {});
-
-const myanimelistClientId = resolveEnvValue(
-  args['myanimelist-client-id'],
-  hiddenEnvValues.MYANIMELIST_CLIENT_ID,
-  existingEnvValues.MYANIMELIST_CLIENT_ID,
-);
-const anilistClientId = resolveEnvValue(
-  args['anilist-client-id'],
-  hiddenEnvValues.ANILIST_CLIENT_ID,
-  existingEnvValues.ANILIST_CLIENT_ID,
-);
+const myanimelistClientId = resolveOptionalValue({
+  argument: args['myanimelist-client-id'],
+  existingValue: readEnvValue(envFilePath, 'MYANIMELIST_CLIENT_ID'),
+  environmentValue: process.env.MYANIMELIST_CLIENT_ID,
+});
+const anilistClientId = resolveOptionalValue({
+  argument: args['anilist-client-id'],
+  existingValue: readEnvValue(envFilePath, 'ANILIST_CLIENT_ID'),
+  environmentValue: process.env.ANILIST_CLIENT_ID,
+});
 
 const gitHash = args['git-hash'] || getGitHash();
 const releaseDate = args['release-date'] || formatUtcDate(new Date());
 const nodeEnv =
   args['node-env'] ||
   (buildType.toLowerCase().includes('release') ? 'production' : 'development');
+const rozeniteEnabled = nodeEnv !== 'production';
 
 const generatedEnvContent = [
-  `BUILD_TYPE=${JSON.stringify(buildType)}`,
-  `GIT_HASH=${JSON.stringify(gitHash)}`,
-  `RELEASE_DATE=${JSON.stringify(releaseDate)}`,
-  `NODE_ENV=${JSON.stringify(nodeEnv)}`,
-  `MYANIMELIST_CLIENT_ID=${JSON.stringify(myanimelistClientId)}`,
-  `ANILIST_CLIENT_ID=${JSON.stringify(anilistClientId)}`,
+  formatEnvEntry('BUILD_TYPE', buildType),
+  formatEnvEntry('GIT_HASH', gitHash),
+  formatEnvEntry('RELEASE_DATE', releaseDate),
+  formatEnvEntry('NODE_ENV', nodeEnv),
+  formatEnvEntry('WITH_ROZENITE', rozeniteEnabled),
+  formatEnvEntry('MYANIMELIST_CLIENT_ID', myanimelistClientId),
+  formatEnvEntry('ANILIST_CLIENT_ID', anilistClientId),
   '',
-].join('\n');
+]
+  .filter(value => value !== undefined)
+  .join('\n');
+
+const { files: hiddenEnvFiles, content: hiddenEnvContent } =
+  readHiddenEnvFiles(projectRoot);
 
 const envContent = hiddenEnvContent
   ? `${generatedEnvContent}\n# Imported hidden env files\n${hiddenEnvContent}\n`
@@ -223,14 +199,16 @@ const buildInfoPath = path.join(
 );
 
 const buildInfoContent = `// This file is generated. Do not edit manually.
-export const BUILD_TYPE: string = ${JSON.stringify(buildType)};
-export const GIT_HASH: string = ${JSON.stringify(gitHash)};
-export const RELEASE_DATE: string = ${JSON.stringify(releaseDate)};
-export const NODE_ENV: string = ${JSON.stringify(nodeEnv)};
-export const MYANIMELIST_CLIENT_ID: string = ${JSON.stringify(
+export const BUILD_TYPE = ${JSON.stringify(buildType)};
+export const GIT_HASH = ${JSON.stringify(gitHash)};
+export const RELEASE_DATE = ${JSON.stringify(releaseDate)};
+export const NODE_ENV = ${JSON.stringify(nodeEnv)};
+export const MYANIMELIST_CLIENT_ID: string | undefined = ${formatTypeScriptValue(
   myanimelistClientId,
 )};
-export const ANILIST_CLIENT_ID: string = ${JSON.stringify(anilistClientId)};
+export const ANILIST_CLIENT_ID: string | undefined = ${formatTypeScriptValue(
+  anilistClientId,
+)};
 
 export default {
   BUILD_TYPE,
@@ -244,14 +222,20 @@ export default {
 
 try {
   fs.mkdirSync(path.dirname(buildInfoPath), { recursive: true });
-  fs.writeFileSync(buildInfoPath, buildInfoContent, 'utf8');
-  fs.writeFileSync(envFilePath, envContent, 'utf8');
+  writeFileAtomically(buildInfoPath, buildInfoContent);
+  writeFileAtomically(envFilePath, envContent);
 
-  console.log(`Generated .env for ${buildType} build`);
+  console.log(`Generated build environment for ${buildType} build`);
+  console.log(
+    `Wrote ${path.relative(projectRoot, envFilePath)} and ${path.relative(
+      projectRoot,
+      buildInfoPath,
+    )}`,
+  );
 
   if (hiddenEnvFiles.length > 0) {
     console.log(
-      `Imported ${hiddenEnvFiles.length} hidden env file(s):`,
+      `Imported ${hiddenEnvFiles.length} hidden environment file(s):`,
       hiddenEnvFiles.map(filePath => path.basename(filePath)),
     );
   }
@@ -261,8 +245,13 @@ try {
     GIT_HASH: gitHash,
     RELEASE_DATE: releaseDate,
     NODE_ENV: nodeEnv,
+    WITH_ROZENITE: rozeniteEnabled ? 'enabled' : 'disabled',
+    MYANIMELIST_CLIENT_ID: myanimelistClientId
+      ? 'configured'
+      : 'not configured',
+    ANILIST_CLIENT_ID: anilistClientId ? 'configured' : 'not configured',
   });
 } catch (err) {
-  console.error('Error: Could not write .env file:', err.message);
+  console.error('Error: Could not generate build environment:', err.message);
   process.exit(1);
 }

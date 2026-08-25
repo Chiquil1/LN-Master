@@ -7,10 +7,10 @@ import LibraryNovelItem from './LibraryNovelItem';
 
 import { NovelInfo } from '@database/types';
 
-import { getString } from '@strings/translations';
+import { getString } from '@i18n/translations';
 import { useTheme } from '@hooks/persisted';
 import { LibraryScreenProps } from '@navigators/types';
-import ServiceManager from '@services/ServiceManager';
+import { backgroundTasks } from '@services/backgroundTasks';
 import { getPlugin } from '@plugins/pluginManager';
 import { useSelectionContext } from '../SelectionContext';
 import { ImageRequestInit } from '@plugins/types';
@@ -23,7 +23,7 @@ interface Props {
   pickAndImport: () => void;
 }
 
-const LibraryViewComponent: React.FC<Props> = ({
+export const LibraryView: React.FC<Props> = ({
   categoryId,
   categoryName,
   pickAndImport,
@@ -80,7 +80,7 @@ const LibraryViewComponent: React.FC<Props> = ({
     if (categoryId === 2) {
       return;
     }
-    ServiceManager.manager.addTask({
+    backgroundTasks.enqueue({
       name: 'UPDATE_LIBRARY',
       data: { categoryId, categoryName },
     });
@@ -91,7 +91,7 @@ const LibraryViewComponent: React.FC<Props> = ({
       <EmptyView
         theme={theme}
         icon="Σ(ಠ_ಠ)"
-        description={getString('libraryScreen.empty')}
+        description={getString('libraryScreen.emptyCategory')}
         actions={[
           categoryId !== 2
             ? {
@@ -135,9 +135,6 @@ const LibraryViewComponent: React.FC<Props> = ({
   );
 };
 
-export const LibraryView = React.memo(
-  LibraryViewComponent,
-) as typeof LibraryViewComponent;
 const styles = StyleSheet.create({
   flex: { flex: 1 },
 });

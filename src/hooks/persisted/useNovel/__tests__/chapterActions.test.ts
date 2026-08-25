@@ -5,9 +5,11 @@ import {
   ChapterActionsDependencies,
   deleteChapterAction,
   deleteChaptersAction,
+  increaseTimeSpentAction,
   markChapterReadAction,
   markChaptersReadAction,
   markChaptersUnreadAction,
+  markChaptersUnreadAndResetProgressAction,
   markPreviouschaptersReadAction,
   markPreviousChaptersUnreadAction,
   refreshChaptersAction,
@@ -29,6 +31,7 @@ const makeChapter = (id: number, overrides: Partial<ChapterInfo> = {}) => ({
   page: '1',
   progress: 0,
   position: id - 1,
+  timeSpent: 0,
   ...overrides,
 });
 
@@ -47,9 +50,11 @@ const createDeps = (): jest.Mocked<ChapterActionsDependencies> => ({
   markPreviousChaptersUnread: jest.fn().mockResolvedValue(undefined),
   markChaptersUnread: jest.fn().mockResolvedValue(undefined),
   updateChapterProgress: jest.fn().mockResolvedValue(undefined),
+  updateChapterProgressByIds: jest.fn().mockResolvedValue(undefined),
   deleteChapter: jest.fn().mockResolvedValue(undefined),
   deleteChapters: jest.fn().mockResolvedValue(undefined),
   getPageChapters: jest.fn().mockResolvedValue([]),
+  increaseTimeSpent: jest.fn().mockResolvedValue(undefined),
   showToast: jest.fn(),
   getString: jest
     .fn<
@@ -144,6 +149,45 @@ describe('chapterActions', () => {
 
     expect(deps.markChaptersUnread).toHaveBeenCalledWith([2]);
     expect(state.getState().map(ch => ch.unread)).toEqual([false, true]);
+  });
+
+  it('marks chapters unread and resets progress only after both writes succeed', async () => {
+    const deps = createDeps();
+    const state = createStateMutator([
+      makeChapter(1, { unread: false, progress: 75 }),
+    ]);
+
+    const success = await markChaptersUnreadAndResetProgressAction(
+      [makeChapter(1)],
+      state.mutate,
+      deps,
+    );
+
+    expect(success).toBe(true);
+    expect(deps.markChaptersUnread).toHaveBeenCalledWith([1]);
+    expect(deps.updateChapterProgressByIds).toHaveBeenCalledWith([1], 0);
+    expect(state.getState()[0]).toEqual(
+      expect.objectContaining({ unread: true, progress: 0 }),
+    );
+  });
+
+  it('keeps chapter state unchanged when unread reset persistence fails', async () => {
+    const deps = createDeps();
+    deps.updateChapterProgressByIds.mockRejectedValue(
+      new Error('write failed'),
+    );
+    const original = makeChapter(1, { unread: false, progress: 75 });
+    const state = createStateMutator([original]);
+
+    const success = await markChaptersUnreadAndResetProgressAction(
+      [makeChapter(1)],
+      state.mutate,
+      deps,
+    );
+
+    expect(success).toBe(false);
+    expect(state.getState()[0]).toEqual(original);
+    expect(deps.showToast).toHaveBeenCalledWith('write failed');
   });
 
   it('updateChapterProgressAction clamps persisted and in-memory progress values', () => {
@@ -276,5 +320,34 @@ describe('chapterActions', () => {
       expect.objectContaining({ id: 1, unread: false }),
       expect.objectContaining({ id: 2, unread: false }),
     ]);
+  });
+  it('increaseTimeSpentAction persists the elapsed time', () => {
+    const deps = createDeps();
+
+    increaseTimeSpentAction(1, 200, deps);
+
+    expect(deps.increaseTimeSpent).toHaveBeenCalledWith(1, 200);
+  });
+
+  it('increaseTimeSpentAction supports repeated calls on the same chapter', () => {
+    const deps = createDeps();
+
+    increaseTimeSpentAction(1, 100, deps);
+    increaseTimeSpentAction(1, 150, deps);
+
+    expect(deps.increaseTimeSpent).toHaveBeenNthCalledWith(1, 1, 100);
+    expect(deps.increaseTimeSpent).toHaveBeenNthCalledWith(2, 1, 150);
+  });
+
+  it('increaseTimeSpentAction leaves the in-memory chapter list untouched', () => {
+    const deps = createDeps();
+    const state = createStateMutator([makeChapter(1, { timeSpent: 500 })]);
+    const before = state.getState();
+
+    increaseTimeSpentAction(1, 200, deps);
+
+    // Reading time is reported every few seconds and no screen renders it from
+    // the store, so the list must not be rebuilt for it.
+    expect(state.getState()).toBe(before);
   });
 });

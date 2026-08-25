@@ -13,16 +13,18 @@ import {
   or,
   gt,
   lt,
+  isNull,
+  notInArray,
 } from 'drizzle-orm';
 import { showToast } from '@utils/showToast';
 import { ChapterInfo, DownloadedChapter, Update } from '../types';
 import { ChapterItem } from '@plugins/types';
 
-import { getString } from '@strings/translations';
+import { getString } from '@i18n/translations';
 import { NOVEL_STORAGE } from '@utils/Storages';
 import { dbManager } from '@database/db';
 import { chapterSchema, novelSchema } from '@database/schema';
-import NativeFile from '@specs/NativeFile';
+import NativeFile from '@modules/native-file';
 import { ChapterFilterKey, ChapterOrderKey } from '@database/constants';
 import { chapterFilterToSQL, chapterOrderToSQL } from '@database/utils/parser';
 import { castInt } from '@database/manager/manager';
@@ -45,17 +47,28 @@ export const insertChapters = async (
     return;
   }
 
-  const nowSql = sql`datetime('now','localtime')`;
+  const nowSql = sql`strftime('%Y-%m-%dT%H:%M:%fZ','now')`;
 
-  const rows = chapters.map((c, index) => ({
-    path: c.path,
-    name: c.name || `Chapter ${index + 1}`,
-    releaseTime: c.releaseTime ?? (options?.preferNullReleaseTime ? null : ''),
-    novelId,
-    chapterNumber: c.chapterNumber ?? index + 1,
-    page: options?.page ?? c.page ?? '1',
-    position: index,
-  }));
+  const rows = chapters.map((c, index) => {
+    let scanlatorStr: string | null = null;
+    if (c.scanlator) {
+      scanlatorStr = Array.isArray(c.scanlator)
+        ? c.scanlator.filter(Boolean).join(', ')
+        : c.scanlator;
+    }
+
+    return {
+      path: c.path,
+      name: c.name || `Chapter ${index + 1}`,
+      releaseTime:
+        c.releaseTime ?? (options?.preferNullReleaseTime ? null : ''),
+      novelId,
+      chapterNumber: c.chapterNumber ?? index + 1,
+      page: options?.page ?? c.page ?? '1',
+      position: index,
+      scanlator: scanlatorStr,
+    };
+  });
   await dbManager.batch(rows, (tx, ph) =>
     tx
       .insert(chapterSchema)
@@ -67,6 +80,7 @@ export const insertChapters = async (
         chapterNumber: ph('chapterNumber'),
         page: ph('page'),
         position: ph('position'),
+        scanlator: ph('scanlator'),
         ...(options?.touchUpdatedTime ? { updatedTime: nowSql } : {}),
       })
       .onConflictDoUpdate({
@@ -77,6 +91,7 @@ export const insertChapters = async (
           name: sql`excluded.name`,
           releaseTime: sql`excluded.releaseTime`,
           chapterNumber: sql`excluded.chapterNumber`,
+          scanlator: sql`excluded.scanlator`,
           ...(options?.touchUpdatedTime ? { updatedTime: nowSql } : {}),
         },
         where: sql`NOT (
@@ -85,6 +100,7 @@ export const insertChapters = async (
           AND ${chapterSchema.name} IS excluded.name
           AND ${chapterSchema.releaseTime} IS excluded.releaseTime
           AND ${chapterSchema.chapterNumber} IS excluded.chapterNumber
+          AND ${chapterSchema.scanlator} IS excluded.scanlator
         )`,
       })
       .prepare(),
@@ -159,14 +175,14 @@ export const markAllChaptersUnread = async (novelId: number): Promise<void> => {
   });
 };
 
-const deleteDownloadedFiles = (
+const deleteDownloadedFiles = async (
   pluginId: string,
   novelId: number,
   chapterId: number,
 ) => {
   try {
     const chapterFolder = `${NOVEL_STORAGE}/${pluginId}/${novelId}/${chapterId}`;
-    NativeFile.unlink(chapterFolder);
+    await NativeFile.unlink(chapterFolder);
   } catch {
     throw new Error(getString('novelScreen.deleteChapterError'));
   }
@@ -178,7 +194,7 @@ export const deleteChapter = async (
   novelId: number,
   chapterId: number,
 ): Promise<void> => {
-  deleteDownloadedFiles(pluginId, novelId, chapterId);
+  await deleteDownloadedFiles(pluginId, novelId, chapterId);
   await dbManager.write(async tx => {
     await tx
       .update(chapterSchema)
@@ -198,8 +214,10 @@ export const deleteChapters = async (
   }
   const chapterIds = chapters.map(chapter => chapter.id);
 
-  chapters.forEach(chapter =>
-    deleteDownloadedFiles(pluginId, novelId, chapter.id),
+  await Promise.all(
+    chapters.map(chapter =>
+      deleteDownloadedFiles(pluginId, novelId, chapter.id),
+    ),
   );
 
   await dbManager.write(async tx => {
@@ -207,6 +225,22 @@ export const deleteChapters = async (
       .update(chapterSchema)
       .set({ isDownloaded: false })
       .where(inArray(chapterSchema.id, chapterIds))
+      .run();
+  });
+};
+
+/** Increases the timeSpent for the specified chapterId by the given amount */
+export const increaseTimeSpent = async (
+  chapterId: number,
+  timeSpent: number,
+): Promise<void> => {
+  await dbManager.write(async tx => {
+    await tx
+      .update(chapterSchema)
+      .set({
+        timeSpent: sql`COALESCE(${chapterSchema.timeSpent}, 0) + ${timeSpent}`,
+      })
+      .where(eq(chapterSchema.id, chapterId))
       .run();
   });
 };
@@ -341,26 +375,40 @@ export const getCustomPages = (novelId: number) => {
   );
 };
 
+const scanlatorFilterToSQL = (excludedScanlators?: string[]) => {
+  if (!excludedScanlators || excludedScanlators.length === 0) {
+    return undefined;
+  }
+  return or(
+    isNull(chapterSchema.scanlator),
+    eq(chapterSchema.scanlator, ''),
+    notInArray(chapterSchema.scanlator, excludedScanlators),
+  );
+};
+
 export const getNovelChapters = async (
   novelId: number,
   sort?: ChapterOrderKey,
   filter?: ChapterFilterKey[],
   page?: string,
   limit: number = 1000,
-): Promise<ChapterInfo[]> =>
-  dbManager
+  excludedScanlators?: string[],
+): Promise<ChapterInfo[]> => {
+  const conditions = [
+    eq(chapterSchema.novelId, novelId),
+    !page ? undefined : eq(chapterSchema.page, page),
+    chapterFilterToSQL(filter),
+    scanlatorFilterToSQL(excludedScanlators),
+  ].filter(Boolean) as any[];
+
+  return dbManager
     .select()
     .from(chapterSchema)
-    .where(
-      and(
-        eq(chapterSchema.novelId, novelId),
-        !page ? sql.raw('true') : eq(chapterSchema.page, page),
-        chapterFilterToSQL(filter),
-      ),
-    )
+    .where(and(...conditions))
     .orderBy(chapterOrderToSQL(sort))
     .limit(limit)
     .all();
+};
 
 export const getNovelChaptersSync = (
   novelId: number,
@@ -368,21 +416,24 @@ export const getNovelChaptersSync = (
   filter?: ChapterFilterKey[],
   page?: string,
   limit: number = 1000,
-): ChapterInfo[] =>
-  dbManager.allSync(
+  excludedScanlators?: string[],
+): ChapterInfo[] => {
+  const conditions = [
+    eq(chapterSchema.novelId, novelId),
+    !page ? undefined : eq(chapterSchema.page, page),
+    chapterFilterToSQL(filter),
+    scanlatorFilterToSQL(excludedScanlators),
+  ].filter(Boolean) as any[];
+
+  return dbManager.allSync(
     dbManager
       .select()
       .from(chapterSchema)
-      .where(
-        and(
-          eq(chapterSchema.novelId, novelId),
-          !page ? sql.raw('true') : eq(chapterSchema.page, page),
-          chapterFilterToSQL(filter),
-        ),
-      )
+      .where(and(...conditions))
       .orderBy(chapterOrderToSQL(sort))
       .limit(limit), // Adding a limit to prevent potential performance issues with large datasets
   );
+};
 /**
  * @deprecated, use getNovelChapters with whereConditions instead
  */
@@ -442,17 +493,19 @@ export const getPageChapters = async (
   page?: string,
   offset?: number,
   limit?: number,
+  excludedScanlators?: string[],
 ): Promise<ChapterInfo[]> => {
+  const conditions = [
+    eq(chapterSchema.novelId, novelId),
+    eq(chapterSchema.page, page || '1'),
+    chapterFilterToSQL(filter),
+    scanlatorFilterToSQL(excludedScanlators),
+  ].filter(Boolean) as any[];
+
   const query = dbManager
     .select()
     .from(chapterSchema)
-    .where(
-      and(
-        eq(chapterSchema.novelId, novelId),
-        eq(chapterSchema.page, page || '1'),
-        chapterFilterToSQL(filter),
-      ),
-    )
+    .where(and(...conditions))
     .$dynamic();
 
   if (sort) {
@@ -472,33 +525,37 @@ export const getChapterCount = async (
   novelId: number,
   page: string = '1',
   filter?: ChapterFilterKey[],
-) =>
-  await dbManager.$count(
-    chapterSchema,
-    and(
-      eq(chapterSchema.novelId, novelId),
-      eq(chapterSchema.page, page),
-      chapterFilterToSQL(filter),
-    ),
-  );
+  excludedScanlators?: string[],
+) => {
+  const conditions = [
+    eq(chapterSchema.novelId, novelId),
+    eq(chapterSchema.page, page),
+    chapterFilterToSQL(filter),
+    scanlatorFilterToSQL(excludedScanlators),
+  ].filter(Boolean) as any[];
+
+  return await dbManager.$count(chapterSchema, and(...conditions));
+};
 
 export const getChapterCountSync = (
   novelId: number,
   page: string = '1',
   filter?: ChapterFilterKey[],
+  excludedScanlators?: string[],
 ): number => {
+  const conditions = [
+    eq(chapterSchema.novelId, novelId),
+    eq(chapterSchema.page, page),
+    chapterFilterToSQL(filter),
+    scanlatorFilterToSQL(excludedScanlators),
+  ].filter(Boolean) as any[];
+
   // Using count(*) as name because the current drizzle version generates wrong type
   const result = dbManager.getSync(
     dbManager
       .select({ 'count(*)': count() })
       .from(chapterSchema)
-      .where(
-        and(
-          eq(chapterSchema.novelId, novelId),
-          eq(chapterSchema.page, page),
-          chapterFilterToSQL(filter),
-        ),
-      ),
+      .where(and(...conditions)),
   );
 
   return result?.['count(*)'] ?? 0;
@@ -510,19 +567,21 @@ export const getPageChaptersBatched = async (
   filter?: ChapterFilterKey[],
   page?: string,
   batch: number = 0,
+  excludedScanlators?: string[],
 ) => {
   const limit = 1000;
   const offset = 1000 * batch;
+  const conditions = [
+    eq(chapterSchema.novelId, novelId),
+    eq(chapterSchema.page, page || '1'),
+    chapterFilterToSQL(filter),
+    scanlatorFilterToSQL(excludedScanlators),
+  ].filter(Boolean) as any[];
+
   const query = dbManager
     .select()
     .from(chapterSchema)
-    .where(
-      and(
-        eq(chapterSchema.novelId, novelId),
-        eq(chapterSchema.page, page || '1'),
-        chapterFilterToSQL(filter),
-      ),
-    )
+    .where(and(...conditions))
     .limit(limit)
     .offset(offset)
     .$dynamic();
@@ -553,22 +612,24 @@ export const getFirstUnreadChapter = (
   novelId: number,
   filter?: ChapterFilterKey[],
   page?: string,
-) =>
-  dbManager.getSync(
+  excludedScanlators?: string[],
+) => {
+  const conditions = [
+    eq(chapterSchema.novelId, novelId),
+    eq(chapterSchema.page, page || '1'),
+    eq(chapterSchema.unread, true),
+    chapterFilterToSQL(filter),
+    scanlatorFilterToSQL(excludedScanlators),
+  ].filter(Boolean) as any[];
+  return dbManager.getSync(
     dbManager
       .select()
       .from(chapterSchema)
-      .where(
-        and(
-          eq(chapterSchema.novelId, novelId),
-          eq(chapterSchema.page, page || '1'),
-          eq(chapterSchema.unread, true),
-          chapterFilterToSQL(filter),
-        ),
-      )
+      .where(and(...conditions))
       .orderBy(asc(chapterSchema.position))
       .limit(1),
   );
+};
 
 export const getNovelChaptersByName = async (
   novelId: number,
@@ -590,56 +651,59 @@ export const getPrevChapter = async (
   novelId: number,
   chapterPosition: number,
   page: string,
-) =>
-  dbManager
+  excludedScanlators?: string[],
+) => {
+  const conditions = [
+    eq(chapterSchema.novelId, novelId),
+    or(
+      and(
+        eq(chapterSchema.page, castInt(page)),
+        lt(chapterSchema.position, castInt(chapterPosition)),
+      ),
+      lt(chapterSchema.page, castInt(page)),
+    ),
+    scanlatorFilterToSQL(excludedScanlators),
+  ].filter(Boolean) as any[];
+
+  return dbManager
     .select()
     .from(chapterSchema)
-    .where(
-      and(
-        eq(chapterSchema.novelId, novelId),
-        or(
-          and(
-            eq(chapterSchema.page, castInt(page)),
-            lt(chapterSchema.position, castInt(chapterPosition)),
-          ),
-          lt(chapterSchema.page, castInt(page)),
-        ),
-      ),
-    )
+    .where(and(...conditions))
     .orderBy(
       desc(castInt(chapterSchema.page)),
       desc(castInt(chapterSchema.position)),
     )
     .get();
+};
 
 export const getNextChapter = async (
   novelId: number,
   chapterPosition: number,
   page: string,
-) =>
-  dbManager
+  excludedScanlators?: string[],
+) => {
+  const conditions = [
+    eq(chapterSchema.novelId, novelId),
+    or(
+      and(
+        eq(chapterSchema.page, castInt(page)),
+        gt(chapterSchema.position, castInt(chapterPosition)),
+      ),
+      gt(chapterSchema.page, castInt(page)),
+    ),
+    scanlatorFilterToSQL(excludedScanlators),
+  ].filter(Boolean) as any[];
+
+  return dbManager
     .select()
     .from(chapterSchema)
-    .where(
-      and(
-        eq(chapterSchema.novelId, novelId),
-        or(
-          and(
-            eq(chapterSchema.page, castInt(page)),
-            gt(chapterSchema.position, castInt(chapterPosition)),
-          ),
-          and(
-            gt(chapterSchema.page, castInt(page)),
-            eq(chapterSchema.position, 0),
-          ),
-        ),
-      ),
-    )
+    .where(and(...conditions))
     .orderBy(
       asc(castInt(chapterSchema.page)),
       asc(castInt(chapterSchema.position)),
     )
     .get();
+};
 
 const getReadDownloadedChapters = async () =>
   dbManager
@@ -677,30 +741,30 @@ export const getNovelDownloadedChapters = async (
   startPosition?: number,
   endPosition?: number,
 ): Promise<ChapterInfo[]> => {
-  const whereConditions = [
-    eq(chapterSchema.novelId, novelId),
-    eq(chapterSchema.isDownloaded, true),
-  ];
-
-  if (startPosition !== undefined && endPosition !== undefined) {
-    whereConditions.push(
-      sql`${chapterSchema.position} >= ${startPosition - 1}`,
-    );
-    whereConditions.push(sql`${chapterSchema.position} <= ${endPosition - 1}`);
-  }
-
-  return dbManager
+  const query = dbManager
     .select()
     .from(chapterSchema)
-    .where(and(...whereConditions))
-    .orderBy(asc(chapterSchema.position))
-    .all();
+    .where(
+      and(
+        eq(chapterSchema.novelId, novelId),
+        eq(chapterSchema.isDownloaded, true),
+      ),
+    )
+    .orderBy(asc(castInt(chapterSchema.page)), asc(chapterSchema.position))
+    .$dynamic();
+
+  if (startPosition !== undefined && endPosition !== undefined) {
+    query.limit(endPosition - startPosition + 1).offset(startPosition - 1);
+  }
+
+  return query.all();
 };
 
 export const getUpdatedOverviewFromDb = async () =>
   dbManager
     .select({
       novelId: novelSchema.id,
+      pluginId: novelSchema.pluginId,
       novelName: novelSchema.name,
       novelCover: novelSchema.cover,
       novelPath: novelSchema.path,
@@ -719,6 +783,8 @@ export const getUpdatedOverviewFromDb = async () =>
 export const getDetailedUpdatesFromDb = async (
   novelId: number,
   onlyDownloadableChapters?: boolean,
+  updateDate?: string,
+  limit?: number,
 ): Promise<Update[]> => {
   return dbManager
     .select({
@@ -737,9 +803,13 @@ export const getDetailedUpdatesFromDb = async (
         onlyDownloadableChapters
           ? eq(chapterSchema.isDownloaded, true)
           : isNotNull(chapterSchema.updatedTime),
+        updateDate
+          ? eq(sql<string>`DATE(${chapterSchema.updatedTime})`, updateDate)
+          : undefined,
       ),
     )
     .orderBy(desc(chapterSchema.updatedTime))
+    .limit(limit ?? -1)
     .all();
 };
 
@@ -757,4 +827,37 @@ export const isChapterDownloaded = (chapterId: number): boolean => {
   );
 
   return !!result;
+};
+
+export const getNovelScanlators = async (
+  novelId: number,
+): Promise<string[]> => {
+  const result = await dbManager
+    .selectDistinct({ scanlator: chapterSchema.scanlator })
+    .from(chapterSchema)
+    .where(
+      and(
+        eq(chapterSchema.novelId, novelId),
+        isNotNull(chapterSchema.scanlator),
+        sql`${chapterSchema.scanlator} != ''`,
+      ),
+    )
+    .all();
+  return result.map(r => r.scanlator).filter(Boolean) as string[];
+};
+
+export const getNovelScanlatorsSync = (novelId: number): string[] => {
+  const result = dbManager.allSync(
+    dbManager
+      .selectDistinct({ scanlator: chapterSchema.scanlator })
+      .from(chapterSchema)
+      .where(
+        and(
+          eq(chapterSchema.novelId, novelId),
+          isNotNull(chapterSchema.scanlator),
+          sql`${chapterSchema.scanlator} != ''`,
+        ),
+      ),
+  );
+  return result.map(r => r.scanlator).filter(Boolean) as string[];
 };

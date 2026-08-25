@@ -7,6 +7,10 @@ const mockUseNovelValue = jest.fn();
 const mockUseNovelActions = jest.fn();
 
 jest.mock('@hooks/persisted', () => ({
+  useAppSettings: () => ({
+    downloadNewChapters: false,
+    refreshNovelMetadata: false,
+  }),
   useTheme: () => ({
     primary: '#111',
     onSurface: '#222',
@@ -18,6 +22,19 @@ jest.mock('@hooks/persisted', () => ({
   useDownload: () => ({
     downloadChapters: mockDownloadChapters,
   }),
+}));
+
+jest.mock('../hooks/useNovelRefresh', () => ({
+  useNovelRefresh: () => ({
+    refresh: jest.fn(),
+    updating: false,
+  }),
+}));
+
+jest.mock('@services/backgroundTasks', () => ({
+  backgroundTasks: {
+    enqueue: jest.fn(),
+  },
 }));
 
 jest.mock('@hooks', () => ({
@@ -37,7 +54,7 @@ jest.mock('@services/plugin/fetch', () => ({
   resolveUrl: jest.fn(() => 'https://example.com'),
 }));
 
-jest.mock('@strings/translations', () => ({
+jest.mock('@i18n/translations', () => ({
   getString: (key: string) => key,
 }));
 
@@ -65,20 +82,6 @@ jest.mock('../components/NovelScreenList', () => {
   return {
     __esModule: true,
     default: ({ setSelected }: any) => {
-      const base = {
-        id: 1,
-        novelId: 7,
-        path: '/chapter/1',
-        releaseTime: '2026-01-01',
-        updatedTime: '2026-01-01',
-        readTime: '2026-01-01',
-        chapterNumber: 1,
-        bookmark: false,
-        progress: 0,
-        page: '1',
-        name: 'Chapter 1',
-      };
-
       return React.createElement(
         View,
         null,
@@ -86,10 +89,7 @@ jest.mock('../components/NovelScreenList', () => {
           Pressable,
           {
             testID: 'select-unread',
-            onPress: () =>
-              setSelected([
-                { ...base, id: 10, unread: true, isDownloaded: false },
-              ]),
+            onPress: () => setSelected([10]),
           },
           React.createElement(Text, null, 'select-unread'),
         ),
@@ -97,10 +97,7 @@ jest.mock('../components/NovelScreenList', () => {
           Pressable,
           {
             testID: 'select-read',
-            onPress: () =>
-              setSelected([
-                { ...base, id: 11, unread: false, isDownloaded: false },
-              ]),
+            onPress: () => setSelected([11]),
           },
           React.createElement(Text, null, 'select-read'),
         ),
@@ -108,10 +105,7 @@ jest.mock('../components/NovelScreenList', () => {
           Pressable,
           {
             testID: 'select-undownloaded',
-            onPress: () =>
-              setSelected([
-                { ...base, id: 12, unread: true, isDownloaded: false },
-              ]),
+            onPress: () => setSelected([12]),
           },
           React.createElement(Text, null, 'select-undownloaded'),
         ),
@@ -224,7 +218,26 @@ const baseNovel = {
 const createStore = (overrides: Record<string, unknown> = {}) => {
   const state = {
     novel: baseNovel,
-    chapters: [],
+    chapters: [
+      {
+        id: 10,
+        unread: true,
+        isDownloaded: false,
+        name: 'Chapter 10',
+      },
+      {
+        id: 11,
+        unread: false,
+        isDownloaded: false,
+        name: 'Chapter 11',
+      },
+      {
+        id: 12,
+        unread: true,
+        isDownloaded: false,
+        name: 'Chapter 12',
+      },
+    ],
     fetching: false,
     batchInformation: { batch: 0, total: 0, totalChapters: 0 },
     getNextChapterBatch: jest.fn(),
@@ -232,7 +245,7 @@ const createStore = (overrides: Record<string, unknown> = {}) => {
     setNovel: jest.fn(),
     bookmarkChapters: jest.fn(),
     markChaptersRead: jest.fn(),
-    markChaptersUnread: jest.fn(),
+    markChaptersUnreadAndResetProgress: jest.fn().mockResolvedValue(true),
     markPreviouschaptersRead: jest.fn(),
     markPreviousChaptersUnread: jest.fn(),
     refreshChapters: jest.fn(),
@@ -255,10 +268,10 @@ const wireStoreSelectors = (store: ReturnType<typeof createStore>) => {
     setNovel: store.state.setNovel,
     bookmarkChapters: store.state.bookmarkChapters,
     markChaptersRead: store.state.markChaptersRead,
-    markChaptersUnread: store.state.markChaptersUnread,
+    markChaptersUnreadAndResetProgress:
+      store.state.markChaptersUnreadAndResetProgress,
     markPreviouschaptersRead: store.state.markPreviouschaptersRead,
     markPreviousChaptersUnread: store.state.markPreviousChaptersUnread,
-    refreshChapters: store.state.refreshChapters,
     deleteChapters: store.state.deleteChapters,
   });
 };
@@ -297,7 +310,7 @@ describe('NovelScreen (task 12 context boundary cutover)', () => {
     expect(store.state.markChaptersRead).toHaveBeenCalledTimes(1);
   });
 
-  it('preserves selected-read workflow parity (mark unread + reset progress + refresh)', () => {
+  it('uses the atomic unread and progress-reset workflow', () => {
     const store = createStore();
     wireStoreSelectors(store);
 
@@ -309,9 +322,10 @@ describe('NovelScreen (task 12 context boundary cutover)', () => {
     fireEvent.press(screen.getByTestId('select-read'));
     fireEvent.press(screen.getByTestId('action-check-outline'));
 
-    expect(store.state.markChaptersUnread).toHaveBeenCalledTimes(1);
-    expect(mockUpdateChapterProgressByIds).toHaveBeenCalledWith([11], 0);
-    expect(store.state.refreshChapters).toHaveBeenCalledTimes(1);
+    expect(
+      store.state.markChaptersUnreadAndResetProgress,
+    ).toHaveBeenCalledTimes(1);
+    expect(mockUpdateChapterProgressByIds).not.toHaveBeenCalled();
   });
 
   it('keeps undefined-novel safety path for download action and guarded modals', () => {

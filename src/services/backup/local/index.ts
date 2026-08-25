@@ -1,26 +1,33 @@
-import { showToast } from '@utils/showToast';
-import dayjs from 'dayjs';
 import {
-  saveDocuments,
-  pick,
-  types,
-  keepLocalCopy,
-} from '@react-native-documents/picker';
-import { CACHE_DIR_PATH, prepareBackupData, restoreData } from '../utils';
-import NativeZipArchive from '@specs/NativeZipArchive';
+  CACHE_DIR_PATH,
+  clearBackupCache,
+  prepareBackupData,
+  restoreData,
+} from '../utils';
+import {
+  finalizeRestoredPlugins,
+  getRestoreCompletionText,
+} from '../restoreResult';
+import { getBackupCompletionText } from '../backupResult';
+import NativeZipArchive from '@modules/native-zip-archive';
 import { ROOT_STORAGE } from '@utils/Storages';
 import { ZipBackupName } from '../types';
-import NativeFile from '@specs/NativeFile';
-import { getString } from '@strings/translations';
-import { BackgroundTaskMetadata } from '@services/ServiceManager';
+import NativeFile from '@modules/native-file';
+import { getString } from '@i18n/translations';
+import type { TaskProgressUpdater } from '@services/backgroundTasks/contracts';
 import { sleep } from '@utils/sleep';
+import { getSelectedBackupFileSections } from '../fileSections';
+import { resolveBackupOptions, type BackupOptions } from '../options';
 
 export const createBackup = async (
-  setMeta?: (
-    transformer: (meta: BackgroundTaskMetadata) => BackgroundTaskMetadata,
-  ) => void,
+  {
+    destinationUri,
+    options: requestedOptions,
+  }: { destinationUri: string; options?: BackupOptions },
+  setMeta?: TaskProgressUpdater,
 ) => {
   try {
+    const options = resolveBackupOptions(requestedOptions);
     setMeta?.(meta => ({
       ...meta,
       isRunning: true,
@@ -28,20 +35,22 @@ export const createBackup = async (
       progressText: getString('backupScreen.preparingData'),
     }));
 
-    await prepareBackupData(CACHE_DIR_PATH);
+    const backupResult = await prepareBackupData(CACHE_DIR_PATH, options);
 
     setMeta?.(meta => ({
       ...meta,
       progress: 1 / 4,
-      progressText: getString('backupScreen.uploadingDownloadedFiles'),
+      progressText: getString('backupScreen.preparingSelectedFiles'),
     }));
 
     await sleep(200);
 
-    await NativeZipArchive.zip(
-      ROOT_STORAGE,
-      CACHE_DIR_PATH + '/' + ZipBackupName.DOWNLOAD,
-    );
+    for (const section of getSelectedBackupFileSections(options)) {
+      await NativeZipArchive.zip(
+        section.storagePath,
+        `${CACHE_DIR_PATH}/${section.archiveName}`,
+      );
+    }
 
     setMeta?.(meta => ({
       ...meta,
@@ -59,36 +68,28 @@ export const createBackup = async (
       progressText: getString('backupScreen.savingBackup'),
     }));
 
-    const datetime = dayjs().format('YYYY-MM-DD_HH_mm');
-    const fileName = 'lnreader_backup_' + datetime + '.zip';
+    await NativeFile.copyFile(CACHE_DIR_PATH + '.zip', destinationUri);
 
-    await saveDocuments({
-      sourceUris: ['file://' + CACHE_DIR_PATH + '.zip'],
-      copy: false,
-      mimeType: 'application/zip',
-      fileName,
-    });
-
+    const completionText = getBackupCompletionText(backupResult);
     setMeta?.(meta => ({
       ...meta,
       progress: 4 / 4,
       isRunning: false,
+      progressText: completionText,
+      completionText,
     }));
-
-    showToast(getString('backupScreen.backupCreated'));
   } catch (error: any) {
     setMeta?.(meta => ({
       ...meta,
       isRunning: false,
     }));
-    showToast(error.message);
+    throw error;
   }
 };
 
 export const restoreBackup = async (
-  setMeta?: (
-    transformer: (meta: BackgroundTaskMetadata) => BackgroundTaskMetadata,
-  ) => void,
+  { sourceUri }: { sourceUri: string },
+  setMeta?: TaskProgressUpdater,
 ) => {
   try {
     setMeta?.(meta => ({
@@ -98,30 +99,9 @@ export const restoreBackup = async (
       progressText: getString('backupScreen.downloadingData'),
     }));
 
-    const [result] = await pick({
-      mode: 'import',
-      type: [types.zip],
-      allowVirtualFiles: true, // TODO: hopefully this just works
-    });
-
-    if (NativeFile.exists(CACHE_DIR_PATH)) {
-      NativeFile.unlink(CACHE_DIR_PATH);
-    }
-
-    const [localRes] = await keepLocalCopy({
-      files: [
-        {
-          uri: result.uri,
-          fileName: 'backup.zip',
-        },
-      ],
-      destination: 'cachesDirectory',
-    });
-    if (localRes.status === 'error') {
-      throw new Error(localRes.copyError);
-    }
-
-    const localPath = localRes.localUri.replace(/^file:(\/\/)?\//, '/');
+    await clearBackupCache();
+    const localPath = CACHE_DIR_PATH + '-source.zip';
+    await NativeFile.copyFile(sourceUri, localPath);
 
     setMeta?.(meta => ({
       ...meta,
@@ -141,34 +121,51 @@ export const restoreBackup = async (
 
     await sleep(200);
 
-    await restoreData(CACHE_DIR_PATH);
+    const restoreResult = await restoreData(CACHE_DIR_PATH, setMeta);
 
     setMeta?.(meta => ({
       ...meta,
       progress: 3 / 4,
-      progressText: getString('backupScreen.downloadingDownloadedFiles'),
+      progressText: getString('backupScreen.restoringSelectedFiles'),
     }));
 
     await sleep(200);
 
-    // TODO: unlink here too?
-    await NativeZipArchive.unzip(
-      CACHE_DIR_PATH + '/' + ZipBackupName.DOWNLOAD,
-      ROOT_STORAGE,
+    if (restoreResult.manifest.formatVersion === 1) {
+      const legacyArchive = CACHE_DIR_PATH + '/' + ZipBackupName.DOWNLOAD;
+      if (!(await NativeFile.exists(legacyArchive))) {
+        throw new Error(getString('backupScreen.invalidBackupFolder'));
+      }
+      await NativeZipArchive.unzip(legacyArchive, ROOT_STORAGE);
+    } else {
+      for (const section of getSelectedBackupFileSections(
+        restoreResult.manifest.sections,
+      )) {
+        const archivePath = `${CACHE_DIR_PATH}/${section.archiveName}`;
+        if (!(await NativeFile.exists(archivePath))) {
+          throw new Error(getString('backupScreen.invalidBackupFolder'));
+        }
+        await NativeZipArchive.unzip(archivePath, section.storagePath);
+      }
+    }
+    const missingPluginIds = await finalizeRestoredPlugins(restoreResult);
+    const completionText = getRestoreCompletionText(
+      restoreResult,
+      missingPluginIds,
     );
 
     setMeta?.(meta => ({
       ...meta,
       progress: 4 / 4,
       isRunning: false,
+      progressText: completionText,
+      completionText,
     }));
-
-    showToast(getString('backupScreen.backupRestored'));
   } catch (error: any) {
     setMeta?.(meta => ({
       ...meta,
       isRunning: false,
     }));
-    showToast(error.message);
+    throw error;
   }
 };

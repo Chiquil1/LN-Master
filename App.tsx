@@ -1,15 +1,15 @@
 import 'react-native-url-polyfill/auto';
 import { enableFreeze } from 'react-native-screens';
-
-enableFreeze(true);
-
-import React, { Suspense, useEffect } from 'react';
+import { PropsWithChildren, Suspense, useEffect, useMemo } from 'react';
 import { StatusBar, StyleSheet } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
-import LottieSplashScreen from 'react-native-lottie-splash-screen';
+import * as SplashScreen from 'expo-splash-screen';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { Provider as PaperProvider } from 'react-native-paper';
-import * as Notifications from 'expo-notifications';
+import {
+  MD3DarkTheme,
+  MD3LightTheme,
+  Provider as PaperProvider,
+} from 'react-native-paper';
 
 import AppErrorBoundary, {
   ErrorFallback,
@@ -18,52 +18,72 @@ import AppErrorBoundary, {
 import Main from './src/navigators/Main';
 import { BottomSheetModalProvider } from '@gorhom/bottom-sheet';
 import { useInitDatabase } from '@database/db';
-import { ThemeProvider } from '@hooks/persisted/useTheme';
-import TTSMiniPlayer from './src/components/TTSMiniPlayer';
-import TTSPlayerService from './src/components/TTSPlayerService';
+import { useInitializeAppServices } from '@hooks/common/useInitializeAppServices';
+import { opSqliteAdapter } from './src/rozenite/opSqliteAdapter';
+import { useRozeniteSqlitePlugin } from '@rozenite/sqlite-plugin';
+import { ThemeProvider, useTheme } from '@hooks/persisted/useTheme';
 
-Notifications.setNotificationHandler({
-  handleNotification: async () => {
+enableFreeze(true);
+const sqliteAdapters = __DEV__ && opSqliteAdapter ? [opSqliteAdapter] : [];
+
+const ThemedPaperProvider = ({ children }: PropsWithChildren) => {
+  const theme = useTheme();
+  const paperTheme = useMemo(() => {
+    const baseTheme = theme.isDark ? MD3DarkTheme : MD3LightTheme;
+
     return {
-      shouldPlaySound: false,
-      shouldSetBadge: false,
-      shouldShowBanner: true,
-      shouldShowList: true,
+      ...baseTheme,
+      colors: {
+        ...baseTheme.colors,
+        ...theme,
+      },
     };
-  },
-});
+  }, [theme]);
 
+  return <PaperProvider theme={paperTheme}>{children}</PaperProvider>;
+};
 
 const App = () => {
-  const state = useInitDatabase();
+  useRozeniteSqlitePlugin({ adapters: sqliteAdapters });
+  const { success: databaseReady, error: databaseError } = useInitDatabase();
+  const { ready: servicesReady, error: servicesError } =
+    useInitializeAppServices(Boolean(databaseReady));
 
   useEffect(() => {
-    if (state.success || state.error) {
-      LottieSplashScreen.hide();
+    if ((databaseReady && servicesReady) || databaseError || servicesError) {
+      SplashScreen.hideAsync();
     }
-  }, [state.success, state.error]);
+  }, [databaseReady, databaseError, servicesReady, servicesError]);
 
-  if (state.error) {
-    return <ErrorFallback error={state.error} resetError={() => null} />;
+  const initializationError = databaseError || servicesError;
+
+  if (initializationError) {
+    return (
+      <ThemeProvider>
+        <ErrorFallback error={initializationError} resetError={() => null} />
+      </ThemeProvider>
+    );
+  }
+
+  if (!databaseReady || !servicesReady) {
+    return null;
   }
 
   return (
     <Suspense fallback={null}>
       <GestureHandlerRootView style={styles.flex}>
-        <AppErrorBoundary>
-          <SafeAreaProvider>
-            <ThemeProvider>
-              <PaperProvider>
+        <ThemeProvider>
+          <AppErrorBoundary>
+            <SafeAreaProvider>
+              <ThemedPaperProvider>
                 <BottomSheetModalProvider>
-                <StatusBar translucent={true} backgroundColor="transparent" />
-                <Main />
-                <TTSPlayerService />
-                <TTSMiniPlayer />
-              </BottomSheetModalProvider>
-              </PaperProvider>
-            </ThemeProvider>
-          </SafeAreaProvider>
-        </AppErrorBoundary>
+                  <StatusBar translucent={true} backgroundColor="transparent" />
+                  <Main />
+                </BottomSheetModalProvider>
+              </ThemedPaperProvider>
+            </SafeAreaProvider>
+          </AppErrorBoundary>
+        </ThemeProvider>
       </GestureHandlerRootView>
     </Suspense>
   );

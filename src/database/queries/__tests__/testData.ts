@@ -90,6 +90,8 @@ export async function insertTestChapter(
     page: '1',
     position: 0,
     progress: null,
+    scanlator: null,
+    timeSpent: 0,
     ...data,
     novelId,
   };
@@ -193,10 +195,10 @@ export async function insertTestNovelWithChapters(
  */
 export interface TestFixtures {
   novels?: Partial<NovelInsert>[];
-  chapters?: Array<{ novelId: number } & Partial<ChapterInsert>>;
+  chapters?: ({ novelId: number } & Partial<ChapterInsert>)[];
   categories?: Partial<CategoryInsert>[];
   repositories?: Partial<RepositoryInsert>[];
-  novelCategories?: Array<{ novelId: number; categoryId: number }>;
+  novelCategories?: { novelId: number; categoryId: number }[];
 }
 
 export async function seedTestData(

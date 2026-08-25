@@ -13,7 +13,8 @@ import {
   clearAllTables,
 } from './testData';
 import { categorySchema, novelCategorySchema } from '@database/schema';
-import { eq, sql } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
+import { BUILT_IN_CATEGORY_IDS } from '@database/constants';
 
 import {
   getAllNovels,
@@ -31,10 +32,17 @@ import {
   updateNovelCategories,
 } from '../NovelQueries';
 
+const mockGetLibraryDefaultCategoryId = jest.fn<number | undefined, []>();
+
+jest.mock('@hooks/persisted/useSettings', () => ({
+  getLibraryDefaultCategoryId: () => mockGetLibraryDefaultCategoryId(),
+}));
+
 describe('NovelQueries', () => {
   beforeEach(() => {
     const testDb = setupTestDatabase();
     clearAllTables(testDb);
+    mockGetLibraryDefaultCategoryId.mockReturnValue(undefined);
   });
 
   afterAll(() => {
@@ -171,7 +179,7 @@ describe('NovelQueries', () => {
       expect(Boolean(novel?.inLibrary)).toBe(false);
     });
 
-    it('should assign default category when adding to library', async () => {
+    it('should fall back to the built-in default category by ID', async () => {
       const testDb = getTestDb();
       const novelId = await insertTestNovel(testDb, {
         inLibrary: false,
@@ -179,12 +187,16 @@ describe('NovelQueries', () => {
         pluginId: 'test-plugin',
       });
 
-      // Get default category (sort = 1)
-      const defaultCategory = await testDb.drizzleDb
-        .select()
-        .from(categorySchema)
-        .where(sql`${categorySchema.sort} = 1`)
-        .get();
+      await testDb.drizzleDb
+        .update(categorySchema)
+        .set({ sort: 0 })
+        .where(eq(categorySchema.id, BUILT_IN_CATEGORY_IDS.default))
+        .run();
+      await testDb.drizzleDb
+        .update(categorySchema)
+        .set({ sort: 1 })
+        .where(eq(categorySchema.id, BUILT_IN_CATEGORY_IDS.local))
+        .run();
 
       await switchNovelToLibraryQuery('/test/novel', 'test-plugin');
 
@@ -195,10 +207,73 @@ describe('NovelQueries', () => {
         .all();
 
       expect(associations.length).toBeGreaterThan(0);
+      expect(
+        associations.some(
+          association =>
+            association.categoryId === BUILT_IN_CATEGORY_IDS.default,
+        ),
+      ).toBe(true);
+      expect(
+        associations.some(
+          association => association.categoryId === BUILT_IN_CATEGORY_IDS.local,
+        ),
+      ).toBe(false);
+    });
+
+    it('should assign the user-selected default category', async () => {
+      const testDb = getTestDb();
+      const categoryId = await insertTestCategory(testDb, {
+        name: 'Preferred Category',
+      });
+      const novelId = await insertTestNovel(testDb, {
+        inLibrary: false,
+        path: '/test/preferred-category',
+        pluginId: 'test-plugin',
+      });
+      mockGetLibraryDefaultCategoryId.mockReturnValue(categoryId);
+
+      await switchNovelToLibraryQuery(
+        '/test/preferred-category',
+        'test-plugin',
+      );
+
+      const associations = await testDb.drizzleDb
+        .select()
+        .from(novelCategorySchema)
+        .where(eq(novelCategorySchema.novelId, novelId))
+        .all();
 
       expect(
-        associations.some(a => a.categoryId === (defaultCategory?.id ?? -1)),
-      ).toBe(!!defaultCategory);
+        associations.some(association => association.categoryId === categoryId),
+      ).toBe(true);
+    });
+
+    it('should fall back when the selected category no longer exists', async () => {
+      const testDb = getTestDb();
+      const novelId = await insertTestNovel(testDb, {
+        inLibrary: false,
+        path: '/test/missing-preferred-category',
+        pluginId: 'test-plugin',
+      });
+      mockGetLibraryDefaultCategoryId.mockReturnValue(999);
+
+      await switchNovelToLibraryQuery(
+        '/test/missing-preferred-category',
+        'test-plugin',
+      );
+
+      const associations = await testDb.drizzleDb
+        .select()
+        .from(novelCategorySchema)
+        .where(eq(novelCategorySchema.novelId, novelId))
+        .all();
+
+      expect(
+        associations.some(
+          association =>
+            association.categoryId === BUILT_IN_CATEGORY_IDS.default,
+        ),
+      ).toBe(true);
     });
   });
 
