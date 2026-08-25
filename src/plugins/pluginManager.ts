@@ -13,6 +13,7 @@ import NativeFile from '@modules/native-file';
 import { showToast } from '@utils/showToast';
 import { PLUGIN_STORAGE } from '@utils/Storages';
 import { getMMKVObject, setMMKVObject } from '@utils/mmkv/mmkv';
+import { createScopedLogger } from '@utils/logger';
 
 import {
   store,
@@ -40,7 +41,63 @@ const packages: Record<string, any> = {
   '@libs/utils': { utf8ToBytes, bytesToUtf8 },
 };
 
+const DANGEROUS_PATTERNS = [
+  /eval\s*\(/,
+  /new\s+Function\s*\(/,
+  /Function\s*\(/,
+  /setTimeout\s*\(/,
+  /setInterval\s*\(/,
+  /setImmediate\s*\(/,
+  /process\./,
+  /require\s*\(\s*['"]fs['"]/,
+  /require\s*\(\s*['"]child_process['"]/,
+  /require\s*\(\s*['"]vm['"]/,
+  /require\s*\(\s*['"]cluster['"]/,
+  /global\s*=/,
+  /window\s*=/,
+  /self\s*=/,
+  /this\s*\.\s*constructor/,
+  /__proto__/,
+  /constructor\s*\[/,
+  /Object\.constructor/,
+  /Array\.constructor/,
+  /Function\.constructor/,
+] as const;
+
+const validatePluginCode = (
+  code: string,
+): { valid: boolean; reason?: string } => {
+  for (const pattern of DANGEROUS_PATTERNS) {
+    if (pattern.test(code)) {
+      return {
+        valid: false,
+        reason: `Dangerous pattern detected: ${pattern.source}`,
+      };
+    }
+  }
+
+  const lines = code.split('\n');
+  if (lines.length > 5000) {
+    return {
+      valid: false,
+      reason: 'Plugin code exceeds maximum allowed lines (5000)',
+    };
+  }
+
+  return { valid: true };
+};
+
+const pluginLogger = createScopedLogger('PluginManager');
+
 const initPlugin = (pluginId: string, rawCode: string) => {
+  const validation = validatePluginCode(rawCode);
+  if (!validation.valid) {
+    if (__DEV__) {
+      pluginLogger.warn('Plugin validation failed:', validation.reason);
+    }
+    return undefined;
+  }
+
   try {
     const _require = (packageName: string) => {
       if (packageName === '@libs/storage') {

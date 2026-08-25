@@ -19,6 +19,7 @@ module.exports = defineConfig([
     '.expo/**',
     'dist/**',
     'coverage/**',
+    'scripts/**',
     'assets/reader/js/polyfill-onscrollend.js',
     'assets/reader/js/text-vibe.js',
     'assets/reader/js/van.js',

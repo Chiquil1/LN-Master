@@ -250,8 +250,11 @@ export default function useChapter(
           const targetChapter = chapters[index];
 
           try {
-            const chapterText = await loadChapterHtml(targetChapter);
-            prepared[index] = { chapter: targetChapter, chapterText };
+            const loadedChapterText = await loadChapterHtml(targetChapter);
+            prepared[index] = {
+              chapter: targetChapter,
+              chapterText: loadedChapterText,
+            };
             rememberPrefetchedChapter(targetChapter.id);
           } catch {
             // An unavailable chapter must not discard the rest of the buffer.

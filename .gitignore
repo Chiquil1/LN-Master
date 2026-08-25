@@ -90,6 +90,8 @@ flake.lock
 # pnpm
 .pnpm-store
 
+plugins/spanish/
+
 src/generated/**/*
 
 .cursor/

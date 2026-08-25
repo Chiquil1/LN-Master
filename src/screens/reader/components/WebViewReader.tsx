@@ -284,7 +284,6 @@ const WebViewReader: React.FC<WebViewReaderProps> = ({
       );
 
       if (generation !== ttsSessionGenerationRef.current) {
-        
       }
     },
     [appendToQueue, chapter.name, novel?.cover, novel?.name],
