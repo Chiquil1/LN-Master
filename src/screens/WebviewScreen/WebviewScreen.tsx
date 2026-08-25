@@ -18,6 +18,9 @@ import { getUserAgent } from '@hooks/persisted/useUserAgent';
 
 import { resolveUrl } from '@services/plugin/fetch';
 
+import { inspectNovelyraSinglePage } from '@services/plugin/novelyraInspector';
+import { createScopedLogger } from '@utils/logger';
+
 import CookieManager from '@preeternal/react-native-cookie-manager';
 
 import {
@@ -38,7 +41,9 @@ type StorageData = {
 const WebviewScreen = ({ route, navigation }: WebviewScreenProps) => {
   const { name, url, pluginId, isNovel } = route.params;
 
-  const isSave = getPlugin(pluginId)?.webStorageUtilized;
+  const plugin = getPlugin(pluginId);
+
+  const isSave = plugin?.webStorageUtilized;
 
   const uri = useMemo(
     () => resolveUrl(pluginId, url, isNovel),
@@ -50,6 +55,10 @@ const WebviewScreen = ({ route, navigation }: WebviewScreenProps) => {
   const theme = useTheme();
 
   const webViewRef = useRef<WebView<object> | null>(null);
+
+  const inspectedUrlsRef = useRef(new Set<string>());
+
+  const inspectingUrlsRef = useRef(new Set<string>());
 
   const [progress, setProgress] = useState(0);
 
@@ -65,17 +74,74 @@ const WebviewScreen = ({ route, navigation }: WebviewScreenProps) => {
 
   const [menuVisible, setMenuVisible] = useState(false);
 
-  const handleNavigation = (e: WebViewNavigation) => {
-    if (!e.loading) {
-      setTitle(e.title);
-    }
+  const novelyraLogger = useMemo(
+    () => createScopedLogger('Novelyra Inspector'),
+    [],
+  );
 
-    setCurrentUrl(e.url);
+  const inspectNovelyraUrl = useCallback(
+    async (targetUrl: string) => {
+      if (
+        !__DEV__ ||
+        pluginId !== 'novelyra' ||
+        !targetUrl.startsWith('https://novelyra.com')
+      ) {
+        return;
+      }
 
-    setCanGoBack(e.canGoBack);
+      if (inspectingUrlsRef.current.has(targetUrl)) {
+        return;
+      }
 
-    setCanGoForward(e.canGoForward);
-  };
+      if (inspectedUrlsRef.current.has(targetUrl)) {
+        return;
+      }
+
+      inspectingUrlsRef.current.add(targetUrl);
+
+      try {
+        novelyraLogger.log('Capturing:', targetUrl);
+
+        const result = await inspectNovelyraSinglePage(targetUrl, targetUrl);
+
+        novelyraLogger.log('Result:', result);
+
+        /*
+         * Only mark the URL as inspected when we
+         * actually received a successful HTML page.
+         *
+         * This is important for Cloudflare:
+         * if the first request receives a challenge,
+         * we allow a later successful load to retry.
+         */
+        if (result.ok && result.status === 200 && result.htmlLength > 1000) {
+          inspectedUrlsRef.current.add(targetUrl);
+        }
+      } catch (error) {
+        novelyraLogger.error('Error:', targetUrl, error);
+      } finally {
+        inspectingUrlsRef.current.delete(targetUrl);
+      }
+    },
+    [pluginId, novelyraLogger],
+  );
+
+  const handleNavigation = useCallback(
+    (e: WebViewNavigation) => {
+      if (!e.loading) {
+        setTitle(e.title);
+
+        void inspectNovelyraUrl(e.url);
+      }
+
+      setCurrentUrl(e.url);
+
+      setCanGoBack(e.canGoBack);
+
+      setCanGoForward(e.canGoForward);
+    },
+    [inspectNovelyraUrl],
+  );
 
   const handleLoadProgress = useCallback(
     ({ nativeEvent }: WebViewProgressEvent) => {
@@ -88,7 +154,7 @@ const WebviewScreen = ({ route, navigation }: WebviewScreenProps) => {
     [],
   );
 
-  const saveData = async () => {
+  const saveData = useCallback(async () => {
     if (pluginId && tempData && isSave) {
       store.set(
         pluginId + WEBVIEW_LOCAL_STORAGE,
@@ -129,7 +195,7 @@ const WebviewScreen = ({ route, navigation }: WebviewScreenProps) => {
         );
       }
     }
-  };
+  }, [currentUrl, isSave, pluginId, tempData]);
 
   useBackHandler(() => {
     if (menuVisible) {
@@ -152,7 +218,6 @@ const WebviewScreen = ({ route, navigation }: WebviewScreenProps) => {
   const injectJavaScriptCode =
     'window.ReactNativeWebView.postMessage(JSON.stringify({localStorage, sessionStorage}))';
 
-  // Keep source stable across progress updates.
   const source = useMemo(() => ({ uri }), [uri]);
 
   return (
@@ -192,9 +257,13 @@ const WebviewScreen = ({ route, navigation }: WebviewScreenProps) => {
         injectedJavaScript={injectJavaScriptCode}
         onNavigationStateChange={handleNavigation}
         onLoadProgress={handleLoadProgress}
-        onMessage={({ nativeEvent }: { nativeEvent: { data: string } }) =>
-          setTempData(JSON.parse(nativeEvent.data))
-        }
+        onMessage={({
+          nativeEvent,
+        }: {
+          nativeEvent: {
+            data: string;
+          };
+        }) => setTempData(JSON.parse(nativeEvent.data))}
       />
 
       {menuVisible ? (

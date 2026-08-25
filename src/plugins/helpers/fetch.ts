@@ -22,12 +22,6 @@ type FetchInit = {
 
 const makeInit = (init?: FetchInit): FetchInit => {
   const defaultHeaders = {
-    Connection: 'keep-alive',
-    Accept: '*/*',
-    'Accept-Language': '*',
-    'Sec-Fetch-Mode': 'cors',
-    'Accept-Encoding': 'gzip, deflate',
-    'Cache-Control': 'max-age=0',
     'User-Agent': getUserAgent(),
   };
 
@@ -54,7 +48,7 @@ const makeInit = (init?: FetchInit): FetchInit => {
 
 /**
  * Obtiene las cookies asociadas a la URL desde el almacén
- * utilizado por el WebView y las convierte en un header Cookie.
+ * compartido con el WebView y las convierte en un header Cookie.
  */
 const getWebViewCookieHeader = async (url: string): Promise<string> => {
   try {
