@@ -25,7 +25,6 @@ import { defaultCover } from './helpers/constants';
 import { downloadFile, fetchApi, fetchProto, fetchText } from './helpers/fetch';
 import { FilterTypes } from './types/filterTypes';
 import { isUrlAbsolute } from './helpers/isAbsoluteUrl';
-import * as translationLib from './helpers/translation';
 
 const packages: Record<string, any> = {
   'htmlparser2': { Parser },
@@ -39,10 +38,7 @@ const packages: Record<string, any> = {
   '@libs/defaultCover': { defaultCover },
   '@libs/aes': { gcm },
   '@libs/utils': { utf8ToBytes, bytesToUtf8 },
-  '@libs/translation': translationLib,
 };
-
-let lastInitError: Error | undefined;
 
 const initPlugin = (pluginId: string, rawCode: string) => {
   try {
@@ -84,8 +80,7 @@ const initPlugin = (pluginId: string, rawCode: string) => {
     }
 
     return plugin;
-  } catch (error) {
-    lastInitError = error as Error;
+  } catch {
     return undefined;
   }
 };
@@ -96,18 +91,12 @@ export const INSTALLED_PLUGINS_KEY = 'INSTALL_PLUGINS';
 const installPlugin = async (
   _plugin: PluginItem,
 ): Promise<Plugin | undefined> => {
-  const res = await fetch(_plugin.url, {
+  const rawCode = await fetch(_plugin.url, {
     headers: { 'pragma': 'no-cache', 'cache-control': 'no-cache' },
-  });
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status} al descargar ${_plugin.name}: ${_plugin.url}`);
-  }
-  const rawCode = await res.text();
+  }).then(res => res.text());
   const plugin = initPlugin(_plugin.id, rawCode);
   if (!plugin) {
-    throw new Error(
-      `${_plugin.name}: error cargando el plugin (${lastInitError?.message ?? 'unknown'})`,
-    );
+    return undefined;
   }
   let currentPlugin = plugins[plugin.id];
   if (!currentPlugin || newer(plugin.version, currentPlugin.version)) {
