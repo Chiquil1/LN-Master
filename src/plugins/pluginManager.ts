@@ -25,6 +25,7 @@ import { defaultCover } from './helpers/constants';
 import { downloadFile, fetchApi, fetchProto, fetchText } from './helpers/fetch';
 import { FilterTypes } from './types/filterTypes';
 import { isUrlAbsolute } from './helpers/isAbsoluteUrl';
+import * as translationLib from './helpers/translation';
 
 const packages: Record<string, any> = {
   'htmlparser2': { Parser },
@@ -38,6 +39,7 @@ const packages: Record<string, any> = {
   '@libs/defaultCover': { defaultCover },
   '@libs/aes': { gcm },
   '@libs/utils': { utf8ToBytes, bytesToUtf8 },
+  '@libs/translation': translationLib,
 };
 
 const initPlugin = (pluginId: string, rawCode: string) => {
