@@ -42,6 +42,8 @@ const packages: Record<string, any> = {
   '@libs/translation': translationLib,
 };
 
+let lastInitError: Error | undefined;
+
 const initPlugin = (pluginId: string, rawCode: string) => {
   try {
     const _require = (packageName: string) => {
@@ -82,7 +84,8 @@ const initPlugin = (pluginId: string, rawCode: string) => {
     }
 
     return plugin;
-  } catch {
+  } catch (error) {
+    lastInitError = error as Error;
     return undefined;
   }
 };
@@ -93,12 +96,18 @@ export const INSTALLED_PLUGINS_KEY = 'INSTALL_PLUGINS';
 const installPlugin = async (
   _plugin: PluginItem,
 ): Promise<Plugin | undefined> => {
-  const rawCode = await fetch(_plugin.url, {
+  const res = await fetch(_plugin.url, {
     headers: { 'pragma': 'no-cache', 'cache-control': 'no-cache' },
-  }).then(res => res.text());
+  });
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status} al descargar ${_plugin.name}: ${_plugin.url}`);
+  }
+  const rawCode = await res.text();
   const plugin = initPlugin(_plugin.id, rawCode);
   if (!plugin) {
-    return undefined;
+    throw new Error(
+      `${_plugin.name}: error cargando el plugin (${lastInitError?.message ?? 'unknown'})`,
+    );
   }
   let currentPlugin = plugins[plugin.id];
   if (!currentPlugin || newer(plugin.version, currentPlugin.version)) {
